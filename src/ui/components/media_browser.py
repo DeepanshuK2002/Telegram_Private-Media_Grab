@@ -1392,9 +1392,9 @@ class MediaBrowserDialog(QDialog):
         self.setAttribute(Qt.WA_TranslucentBackground, False)
 
         self.setWindowTitle(f"TG Private Grab - {self.channel_title}")
-        icon_path = get_resource_path(os.path.join("assets", "logo.ico"))
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        from resource_utils import get_app_icon, set_windows_taskbar_icon
+        self.setWindowIcon(get_app_icon())
+        set_windows_taskbar_icon(int(self.winId()))
 
         self.setMinimumSize(880, 620)
         self.resize(1020, 680)

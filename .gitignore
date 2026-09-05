@@ -18,7 +18,10 @@ downloader.db
 *.bak
 config.json
 dist/
-build
+build/
+src/dist/
+src/build/
+*.spec
 *.log
 
 # 🔐 Secrets & Local Runtime
@@ -30,3 +33,4 @@ cache/
 *.spec.bak
 scratch/
 src/telegram-video-downloader/
+src/ui/components/credential_info_request.py

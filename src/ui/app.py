@@ -165,9 +165,8 @@ def launch_app(telegram_worker, version="unknown"):
     from PySide6.QtGui import QIcon, QFont
     _app_instance.setFont(QFont("Segoe UI", 9))
 
-    icon_path = get_resource_path(os.path.join("assets", "logo.ico"))
-    if os.path.exists(icon_path):
-        _app_instance.setWindowIcon(QIcon(icon_path))
+    from resource_utils import get_app_icon, set_windows_taskbar_icon
+    _app_instance.setWindowIcon(get_app_icon())
 
     # Determine startup theme:
     #   1. Use saved preference from config.json (if explicitly set by user)
@@ -191,6 +190,7 @@ def launch_app(telegram_worker, version="unknown"):
 
     window = MainWindow(telegram_worker, version)
     window.show()
+    set_windows_taskbar_icon(int(window.winId()))
 
     # Start the worker thread
     telegram_worker.start()

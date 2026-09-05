@@ -184,6 +184,11 @@ class MainWindow(QMainWindow):
     def show_about_dialog(self):
         msg = QMessageBox(self)
         msg.setWindowTitle("About TG Private Grab")
+        from resource_utils import get_app_icon, get_resource_path
+        msg.setWindowIcon(get_app_icon())
+        about_icon_path = get_resource_path(os.path.join("assets", "logo_64.ico"))
+        if os.path.exists(about_icon_path):
+            msg.setIconPixmap(QPixmap(about_icon_path).scaled(64, 64, Qt.KeepAspectRatio, Qt.SmoothTransformation))
 
         # Premium/Rich look with HTML
         text = f"""
@@ -206,12 +211,16 @@ class MainWindow(QMainWindow):
         msg.setStandardButtons(QMessageBox.Ok)
         msg.exec()
 
+    def showEvent(self, event):
+        super().showEvent(event)
+        from resource_utils import set_windows_taskbar_icon
+        set_windows_taskbar_icon(int(self.winId()))
+
     def setup_tray(self):
         self.tray_icon = QSystemTrayIcon(self)
         
-        icon_path = get_resource_path(os.path.join("assets", "logo.ico"))
-        if os.path.exists(icon_path):
-            self.tray_icon.setIcon(QIcon(icon_path))
+        from resource_utils import get_app_icon
+        self.tray_icon.setIcon(get_app_icon())
         
         # Tray Menu
         tray_menu = create_clean_menu(self)
@@ -320,9 +329,9 @@ class MainWindow(QMainWindow):
         logo_layout.setContentsMargins(0, 0, 0, 8)
         
         self.lbl_logo_img = QLabel()
-        logo_png_path = get_resource_path(os.path.join("assets", "logo.png"))
-        if os.path.exists(logo_png_path):
-            pixmap = QPixmap(logo_png_path).scaled(34, 34, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        from resource_utils import get_sidebar_logo_pixmap, get_app_icon, set_windows_taskbar_icon
+        pixmap = get_sidebar_logo_pixmap(36)
+        if not pixmap.isNull():
             self.lbl_logo_img.setPixmap(pixmap)
         self.lbl_logo_img.setAlignment(Qt.AlignCenter)
         logo_layout.addWidget(self.lbl_logo_img)
@@ -362,9 +371,7 @@ class MainWindow(QMainWindow):
         sidebar_layout.addWidget(self.btn_settings)
         
         # Window Icon
-        icon_path = get_resource_path(os.path.join("assets", "logo.ico"))
-        if os.path.exists(icon_path):
-            self.setWindowIcon(QIcon(icon_path))
+        self.setWindowIcon(get_app_icon())
 
         # ---------------------------------------------------------
         # Main Content Layout
