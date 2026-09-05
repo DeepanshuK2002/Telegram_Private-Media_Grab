@@ -580,8 +580,17 @@ class TelegramWorker(QThread):
             t["max_speed_kb"] = max_speed_kb
             # Only overwrite selected_message_ids if it's explicitly provided
             if selected_message_ids is not None:
-                t["selected_message_ids"] = selected_message_ids
-                t["total_items"] = len(selected_message_ids)
+                if task_id:
+                    # Explicit re-select: user chose a fresh set for this task
+                    t["selected_message_ids"] = selected_message_ids
+                else:
+                    # Fresh add: merge the new videos into the existing task so
+                    # previously queued (possibly unfinished) items are kept.
+                    existing = t.get("selected_message_ids") or []
+                    merged = list(dict.fromkeys(list(existing) + list(selected_message_ids)))
+                    t["selected_message_ids"] = merged
+                    selected_message_ids = merged
+                t["total_items"] = len(t["selected_message_ids"])
                 t["topic_id"] = topic_id # Ensure topic_id is updated
             else:
                 selected_message_ids = t.get("selected_message_ids")
