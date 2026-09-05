@@ -3,6 +3,7 @@ from PySide6.QtWidgets import (
     QPushButton, QProgressBar, QSizePolicy, QFrame, QScrollArea
 )
 from PySide6.QtCore import Qt, Signal, QSize
+from PySide6.QtGui import QIcon
 import os
 
 # Styles are now moved to dark_style.qss and style.qss
@@ -121,22 +122,28 @@ class DownloadCard(QWidget):
         ar = QHBoxLayout()
         ar.setSpacing(6)
 
-        self.btn_pause = QPushButton("▶ Resume" if self.is_paused else "⏸ Pause")
+        self.btn_pause = QPushButton("Resume" if self.is_paused else "Pause")
         self.btn_pause.setObjectName("CardButton")
         self.btn_pause.clicked.connect(self.toggle_pause)
 
-        self.btn_folder = QPushButton("📂 Folder")
+        self.btn_folder = QPushButton("Folder")
         self.btn_folder.setObjectName("CardButton")
         self.btn_folder.clicked.connect(self.open_folder)
+        # Open-folder SVG icon
+        icon_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))),
+                                 "assets", "icons", "folder-open.svg")
+        if os.path.exists(icon_path):
+            self.btn_folder.setIcon(QIcon(icon_path))
+            self.btn_folder.setIconSize(QSize(14, 14))
 
-        self.btn_verify = QPushButton("🛡️ Verify")
+        self.btn_verify = QPushButton("Verify")
         self.btn_verify.setObjectName("CardButton")
         self.btn_verify.clicked.connect(self.run_health_check)
 
-        self.btn_trash = QPushButton("🗑 Remove")
+        self.btn_trash = QPushButton("Remove")
         self.btn_trash.setObjectName("CardButton")
 
-        self.btn_reselect = QPushButton("🔄 Re-select")
+        self.btn_reselect = QPushButton("Re-select")
         self.btn_reselect.setObjectName("CardButton")
         self.btn_reselect.setToolTip("Add or remove files for this specific task")
         self.btn_reselect.clicked.connect(lambda checked=False: self.reselectRequested.emit(self.task_id))
@@ -148,12 +155,12 @@ class DownloadCard(QWidget):
         ar.addWidget(self.btn_trash)
         ar.addStretch()
 
-        self.btn_up = QPushButton("⬆")
+        self.btn_up = QPushButton("↑")
         self.btn_up.setFixedWidth(30)
         self.btn_up.setObjectName("CardButtonCompact")
         self.btn_up.setToolTip("Move queue item UP")
 
-        self.btn_down = QPushButton("⬇")
+        self.btn_down = QPushButton("↓")
         self.btn_down.setFixedWidth(30)
         self.btn_down.setObjectName("CardButtonCompact")
         self.btn_down.setToolTip("Move queue item DOWN")
@@ -208,12 +215,12 @@ class DownloadCard(QWidget):
 
         # apply initial state visually
         if self.is_paused:
-            self.btn_pause.setText("▶ Resume")
+            self.btn_pause.setText("Resume")
             self.lbl_status_text.setText("Paused")
             self.lbl_status_text.setProperty("state", "paused")
             self.batch_progress_bar.setProperty("state", "paused")
         else:
-            self.btn_pause.setText("⏸ Pause")
+            self.btn_pause.setText("Pause")
             self.lbl_status_text.setText("Downloading…")
             self.lbl_status_text.setProperty("state", "active")
             self.batch_progress_bar.setProperty("state", "active")
@@ -254,7 +261,7 @@ class DownloadCard(QWidget):
             state_val = "active"
             if is_paused is not None:
                 self.is_paused = is_paused
-                self.btn_pause.setText("▶ Resume" if is_paused else "⏸ Pause")
+                self.btn_pause.setText("Resume" if is_paused else "Pause")
                 self.lbl_status_text.setText("Paused" if is_paused else "Downloading…")
                 state_val = "paused" if is_paused else "active"
             
@@ -283,6 +290,7 @@ class DownloadCard(QWidget):
             self.total_items = total
             self.batch_progress_bar.setMaximum(max(total, 1))
         self.batch_progress_bar.setValue(current)
+        self.batch_progress_bar.setFormat("%p%")
         self.completed = current
         self.lbl_status.setText(f"Downloaded {current} out of {total} items")
         
@@ -292,7 +300,7 @@ class DownloadCard(QWidget):
             self.btn_pause.setEnabled(False)
 
     def _set_completed_style(self):
-        self.lbl_status_text.setText("Completed ✓")
+        self.lbl_status_text.setText("Completed")
         self.lbl_status_text.setProperty("state", "completed")
         self.batch_progress_bar.setProperty("state", "completed")
         self.lbl_status_text.style().unpolish(self.lbl_status_text)
@@ -326,7 +334,7 @@ class DownloadCard(QWidget):
             self.files_layout.addWidget(lbl_more)
 
     def update_file_progress(self, msg_id, current_bytes, total_bytes, speed_str):
-        self.lbl_status_text.setText(f"⬇ {speed_str}")
+        self.lbl_status_text.setText(speed_str)
         
         # Extract numeric speed for global stats (e.g. "450 KB/s" -> 450)
         import re
@@ -344,7 +352,28 @@ class DownloadCard(QWidget):
             self.lbl_status_text.setProperty("state", "active")
             self.lbl_status_text.style().unpolish(self.lbl_status_text)
             self.lbl_status_text.style().polish(self.lbl_status_text)
-            
+
+        # 🔥 Drive the BIG progress bar with the live byte progress of the
+        #    currently downloading video so it moves in real time.
+        frac = 0.0
+        if total_bytes and total_bytes > 0:
+            frac = min(max(current_bytes / float(total_bytes), 0.0), 1.0)
+
+        self.batch_progress_bar.setMaximum(100)
+        self.batch_progress_bar.setValue(int(round(frac * 100)))
+        self.batch_progress_bar.setFormat(f"{frac * 100:5.1f}%")
+
+        # Real-time byte-level status line
+        if total_bytes and total_bytes > 0:
+            cur_mb = current_bytes / (1024.0 * 1024.0)
+            tot_mb = total_bytes / (1024.0 * 1024.0)
+            status = f"⬇ {cur_mb:.1f} / {tot_mb:.1f} MB • {frac * 100:.1f}%"
+            if self.total_items > 1:
+                status += f" • {min(self.completed + 1, self.total_items)} of {self.total_items} items"
+            self.lbl_status.setText(status)
+        else:
+            self.lbl_status.setText(f"Downloading… • {self.completed} of {self.total_items} items")
+
         if msg_id in self.file_rows:
             self.file_rows[msg_id].set_progress(current_bytes, total_bytes)
 
@@ -356,7 +385,7 @@ class DownloadCard(QWidget):
         self.is_paused = not self.is_paused
         if self.is_paused:
             self.parent_worker.pause_download(self.task_id)
-            self.btn_pause.setText("▶ Resume")
+            self.btn_pause.setText("Resume")
             self.lbl_status_text.setText("Paused")
             self.lbl_status_text.setProperty("state", "paused")
             self.batch_progress_bar.setProperty("state", "paused")
@@ -375,7 +404,7 @@ class DownloadCard(QWidget):
                 channel_input=channel_input, media_id=media_id,
                 download_path=self.download_path, download_limit=self.download_limit,
                 max_speed_kb=self.max_speed_kb, task_id=self.task_id)
-            self.btn_pause.setText("⏸ Pause")
+            self.btn_pause.setText("Pause")
             self.lbl_status_text.setText("Downloading…")
             self.lbl_status_text.setProperty("state", "active")
             self.batch_progress_bar.setProperty("state", "active")
@@ -388,7 +417,7 @@ class DownloadCard(QWidget):
 
     def run_health_check(self):
         self.btn_verify.setEnabled(False)
-        self.btn_verify.setText("🛡️ Verifying...")
+        self.btn_verify.setText("Verifying...")
         self.lbl_verify_status.setVisible(True)
         self.lbl_verify_status.setText("Checking file integrity against disk...")
         
@@ -414,7 +443,7 @@ class DownloadCard(QWidget):
 
             if not os.path.exists(fpath):
                 missing += 1
-                row.icon.setText("❓")
+                row.icon.setText("·")
                 row.bar.setProperty("state", "idle")
                 try:
                     unmark_media_completed(c_id, msg_id)
@@ -424,7 +453,7 @@ class DownloadCard(QWidget):
                 actual_size = os.path.getsize(fpath)
                 if meta["size"] > 0 and actual_size != meta["size"]:
                     corrupt += 1
-                    row.icon.setText("⚠️")
+                    row.icon.setText("!")
                     row.bar.setProperty("state", "paused")
                     try:
                         unmark_media_completed(c_id, msg_id)
@@ -432,7 +461,7 @@ class DownloadCard(QWidget):
                         pass
                 else:
                     valid += 1
-                    row.icon.setText("✅")
+                    row.icon.setText("✓")
                     row.bar.setProperty("state", "completed")
                     try:
                         mark_media_completed(c_id, msg_id)
@@ -450,7 +479,7 @@ class DownloadCard(QWidget):
             self.lbl_verify_status.setText(f"Found {total_bad} missing/incomplete files. Click Resume to download.")
             self.lbl_verify_status.setStyleSheet("color: #F59E0B;")
             self.btn_pause.setEnabled(True)
-            self.btn_pause.setText("▶ Resume")
+            self.btn_pause.setText("Resume")
             self.is_paused = True
             self.lbl_status_text.setText("Paused")
             self.lbl_status_text.setProperty("state", "paused")
@@ -468,14 +497,14 @@ class DownloadCard(QWidget):
         self.batch_progress_bar.style().polish(self.batch_progress_bar)
 
         self.btn_verify.setEnabled(True)
-        self.btn_verify.setText("🛡️ Verify")
+        self.btn_verify.setText("Verify")
 
     def set_reselect_loading(self, loading):
         if loading:
-            self.btn_reselect.setText("⏳ Loading...")
+            self.btn_reselect.setText("Loading...")
             self.btn_reselect.setEnabled(False)
         else:
-            self.btn_reselect.setText("🔄 Re-select")
+            self.btn_reselect.setText("Re-select")
             self.btn_reselect.setEnabled(True)
 
     def open_folder(self):
@@ -501,7 +530,7 @@ class FileRow(QWidget):
         layout.setContentsMargins(8, 0, 10, 0)
         layout.setSpacing(8)
 
-        self.icon = QLabel("⏳")
+        self.icon = QLabel("·")
         self.icon.setFixedWidth(18)
         self.icon.setObjectName("FileRowIcon")
 
@@ -535,11 +564,11 @@ class FileRow(QWidget):
             self.bar.setProperty("state", "active")
             self.bar.style().unpolish(self.bar)
             self.bar.style().polish(self.bar)
-            self.icon.setText("⬇️")
+            self.icon.setText("↓")
 
     def set_completed(self):
         self.bar.setValue(100)
         self.bar.setProperty("state", "completed")
         self.bar.style().unpolish(self.bar)
         self.bar.style().polish(self.bar)
-        self.icon.setText("✅")
+        self.icon.setText("✓")

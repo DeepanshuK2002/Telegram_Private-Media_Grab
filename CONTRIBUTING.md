@@ -1,4 +1,4 @@
-# Contributing to Telegram Bulk Media Downloader
+﻿# Contributing to TG Private Grab
 
 Thank you for your interest in contributing! This project is open-source and welcomes contributions of all kinds — bug fixes, new features, documentation, translations, or any improvements that make the tool better.
 
@@ -18,8 +18,8 @@ By contributing, you agree to:
 ### 1. Fork and Clone
 
 ```bash
-git clone https://github.com/vinodkr494/telegram-media-downloader.git
-cd telegram-media-downloader
+git clone https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab.git
+cd Telegram_Private-Media_Grab
 ```
 
 ### 2. Set up the Environment
@@ -45,7 +45,7 @@ Create a `.env` file in the project root:
 ```env
 API_ID=your_api_id
 API_HASH=your_api_hash
-SESSION_NAME=dev_session
+PHONE=+15551234567
 ```
 
 Get your API credentials at [my.telegram.org](https://my.telegram.org).
@@ -61,7 +61,7 @@ python src/gui.py
 ## 🗂️ Project Structure
 
 ```
-telegram-media-downloader/
+Telegram_Private-Media_Grab/
 ├── src/
 │   ├── gui.py              # Entry point for the executable
 │   ├── core_downloader.py  # Download logic, Telethon wrappers, batching
@@ -90,7 +90,7 @@ telegram-media-downloader/
 
 ## 🐛 Reporting Bugs
 
-1. Check [existing issues](https://github.com/vinodkr494/telegram-media-downloader/issues) first
+1. Check [existing issues](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/issues) first
 2. Open a new issue using the **Bug Report** template
 3. Include:
    - OS and Python version
@@ -102,7 +102,7 @@ telegram-media-downloader/
 
 ## 💡 Suggesting Features
 
-1. Open a [Feature Request](https://github.com/vinodkr494/telegram-media-downloader/issues/new) issue
+1. Open a [Feature Request](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/issues/new) issue
 2. Describe the use case and why it would benefit other users
 3. If you want to build it yourself, comment on the issue first so we can coordinate
 
@@ -176,7 +176,7 @@ on_fetch_media_start()
 | 🌐 i18n | Make the UI translatable |
 | 🧪 Tests | Add automated tests for `core_downloader.py` |
 | 🏎️ Performance | Improve large-channel (10,000+ messages) handling |
-| 🖥️ macOS / Linux | Test and fix platform-specific UI quirks |
+| 🖥️ Automation | Automate the Windows build and release pipelines |
 | 📄 Docs | Improve setup guides and add wiki pages |
 
 ---
@@ -187,4 +187,4 @@ By contributing, you agree that your code will be licensed under the [MIT Licens
 
 ---
 
-Made with ❤️ by [Vinod Kumar](https://github.com/vinodkr494). Contributions welcome!
+Made with ❤️ by [Deepanshu](https://github.com/DeepanshuK2002). Contributions welcome!

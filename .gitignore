@@ -20,3 +20,13 @@ config.json
 dist/
 build
 *.log
+
+# 🔐 Secrets & Local Runtime
+.env
+.env.*
+!.env.example
+crash_report.log
+cache/
+*.spec.bak
+scratch/
+src/telegram-video-downloader/

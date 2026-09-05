@@ -1,33 +1,17 @@
 name: Build Executables
 
 on:
-  push:
-    branches:
-      - master
-      - main
-    tags:
-      - 'v*'
   workflow_dispatch:
 
+env:
+  VERSION: 'latest'
+
 jobs:
-  build:
-    name: Build on ${{ matrix.os }} (${{ matrix.arch }})
-    runs-on: ${{ matrix.os }}
+  build-windows:
+    name: Build Windows x64
+    runs-on: windows-latest
     permissions:
       contents: write
-    strategy:
-      matrix:
-        include:
-          - os: ubuntu-latest
-            arch: x64
-          - os: windows-latest
-            arch: x64
-          - os: macos-latest
-            arch: arm64
-          - os: macos-latest
-            arch: x64
-    env:
-      VERSION: 'latest'
 
     steps:
       - name: Checkout code
@@ -36,90 +20,52 @@ jobs:
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: '3.14'
           cache: 'pip'
 
       - name: Install dependencies
         shell: bash
         run: |
-          PREFIX=""
-          if [ "${{ matrix.os }}" == "macos-latest" ] && [ "${{ matrix.arch }}" == "x64" ]; then
-            PREFIX="arch -x86_64"
-            rustup target add x86_64-apple-darwin
-          fi
-          $PREFIX python -m pip install --upgrade pip
-          $PREFIX python -m pip install -r requirements.txt
-          $PREFIX python -m pip install pyinstaller
-          if [ "${{ runner.os }}" == "macOS" ]; then
-            $PREFIX python -m pip install dmgbuild
-          fi
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+          python -m pip install pyinstaller
 
       - name: Extract App Version
         id: get_version
         shell: bash
         run: |
-          PREFIX=""
-          if [ "${{ matrix.os }}" == "macos-latest" ] && [ "${{ matrix.arch }}" == "x64" ]; then
-            PREFIX="arch -x86_64"
-          fi
-          $PREFIX python -c "import re; m = re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', open('src/gui.py', encoding='utf-8').read()); print(f\"VERSION={m.group(1)}\")" >> $GITHUB_ENV
+          python -c "import re; m = re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', open('src/gui.py', encoding='utf-8').read()); print(f\"VERSION={m.group(1)}\")" >> $GITHUB_ENV
 
       - name: Build executable
         shell: bash
         run: |
           cd src
-          PREFIX=""
-          if [ "${{ matrix.os }}" == "macos-latest" ] && [ "${{ matrix.arch }}" == "x64" ]; then
-            PREFIX="arch -x86_64"
-          fi
-          
-          if [ "${{ runner.os }}" == "macOS" ]; then
-            TARGET_ARCH="arm64"
-            if [ "${{ matrix.arch }}" == "x64" ]; then TARGET_ARCH="x86_64"; fi
-            
-            # Build .app bundle for macOS
-            $PREFIX python -m PyInstaller --noconfirm --windowed --noconsole \
-              --target-architecture $TARGET_ARCH \
-              --add-data "assets:assets" \
-              --icon "assets/logo.ico" \
-              --hidden-import "core_downloader" \
-              --hidden-import "telethon" \
-              --name "TGDownloader" \
-              gui.py
-            cd ..
-            # Create DMG
-            export APP_NAME="TGDownloader.app"
-            $PREFIX dmgbuild -s dmg_settings.py "TG Media Downloader" "src/dist/TGDownloader-v${VERSION}-macOS-${{ matrix.arch }}.dmg"
-          else
-            # Determine path separator for PyInstaller
-            if [ "${{ runner.os }}" == "Windows" ]; then SEP=";"; else SEP=":"; fi
-            
-            # Build onefile binary for Windows/Linux
-            python -m PyInstaller --noconfirm --onefile --windowed \
-              --add-data "assets${SEP}assets" \
-              --icon "assets/logo.ico" \
-              --hidden-import "core_downloader" \
-              --hidden-import "telethon" \
-              --name "TGDownloader-v${VERSION}-${{ runner.os }}-${{ matrix.arch }}" \
-              gui.py
-            cd ..
-          fi
+          python -m PyInstaller --noconfirm --onefile --windowed \
+            --add-data "assets;assets" \
+            --icon "assets/logo.ico" \
+            --hidden-import "core_downloader" \
+            --hidden-import "telethon" \
+            --hidden-import "PySide6.QtCore" \
+            --hidden-import "PySide6.QtGui" \
+            --hidden-import "PySide6.QtWidgets" \
+            --name "TGPrivateGrab-v${VERSION}" \
+            gui.py
 
       - name: Upload Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: TGDownloader-v${{ env.VERSION }}-${{ runner.os }}-${{ matrix.arch }}
+          name: TGPrivateGrab-v${{ env.VERSION }}-Windows-x64
           path: |
-            src/dist/TGDownloader-v${{ env.VERSION }}-*
-          if-no-files-found: warn
+            src/dist/TGPrivateGrab-v${{ env.VERSION }}.exe
+          if-no-files-found: error
 
       - name: Publish to GitHub Releases
         if: startsWith(github.ref, 'refs/tags/v')
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            src/dist/TGDownloader-v${{ env.VERSION }}-*
-          name: TG Media Downloader v${{ env.VERSION }}
+            src/dist/TGPrivateGrab-v${{ env.VERSION }}.exe
+          name: TG Private Grab v${{ env.VERSION }}
           draft: false
           prerelease: false
           generate_release_notes: true

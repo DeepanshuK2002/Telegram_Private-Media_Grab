@@ -1,8 +1,8 @@
-# 🚀 TG Media Downloader - v3.0 Roadmap Plan
+﻿# 🚀 TG Private Grab - v3.0 Roadmap Plan
 
 > [!IMPORTANT]
 > **We are currently focusing entirely on stabilizing and improving the robustness of existing features.** 
-> If you have ideas or suggestions for new features, please join our [GitHub Discussions (Ideas)](https://github.com/vinodkr494/telegram-media-downloader/discussions/categories/ideas) instead of opening an issue. 
+> If you have ideas or suggestions for new features, please join our [GitHub Discussions (Ideas)](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/discussions/categories/ideas) instead of opening an issue. 
 
 This document tracks the vision and high-level goals for the major **v3.0.0** release.
 
@@ -61,4 +61,3 @@ This document tracks the vision and high-level goals for the major **v3.0.0** re
   - [x] **Custom Folder Naming**: Support `{username}` and `{channel_id}` placeholders in the download path template.
   - [x] **Forum Auto-separation**: Option to automatically download all topics from a forum into separate subfolders named after the topics when the main channel ID is provided.
 - **Next Milestone**: 3.0.0 (The Media Operating System)
-

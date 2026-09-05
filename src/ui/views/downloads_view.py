@@ -22,7 +22,7 @@ class CompletedDownloadRow(QFrame):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(16, 12, 16, 12)
         
-        lbl_title = QLabel(f"✅ {self.title}")
+        lbl_title = QLabel(self.title)
         lbl_title.setObjectName("CardTitle")
         
         lbl_folder = QLabel(f"Saved to: {self.folder_name}")
@@ -30,7 +30,7 @@ class CompletedDownloadRow(QFrame):
         lbl_folder.setStyleSheet("font-size: 11px;")
         
         btn_layout = QHBoxLayout()
-        btn_open = QPushButton("📂 Open Folder")
+        btn_open = QPushButton("Open Folder")
         btn_open.setObjectName("PrimaryRowButton")
         btn_open.setCursor(Qt.PointingHandCursor)
         btn_open.clicked.connect(lambda: self.parent_view.open_folder(self.folder_name))
@@ -43,21 +43,22 @@ class CompletedDownloadRow(QFrame):
         layout.addLayout(btn_layout)
 
     def show_context_menu(self, pos):
-        from PySide6.QtWidgets import QMenu, QApplication
+        from PySide6.QtWidgets import QApplication
         from PySide6.QtGui import QAction, QClipboard, QDesktopServices
         from PySide6.QtCore import QUrl
+        from ui.components.clean_combobox import create_clean_menu
         
-        menu = QMenu(self)
-        action_open = menu.addAction("📂 Open Folder")
-        action_copy = menu.addAction("📋 Copy Full Path")
+        menu = create_clean_menu(self)
+        action_open = menu.addAction("Open Folder")
+        action_copy = menu.addAction("Copy Full Path")
         
         action_refetch = None
         if self.task_id:
             menu.addSeparator()
-            action_refetch = menu.addAction("🔄 Re-fetch This Channel")
+            action_refetch = menu.addAction("Re-fetch This Channel")
             
         menu.addSeparator()
-        action_remove = menu.addAction("🗑 Clear from History")
+        action_remove = menu.addAction("Clear from History")
         
         action = menu.exec(self.mapToGlobal(pos))
         
@@ -103,11 +104,11 @@ class DownloadsView(QWidget):
         self.lbl_active = QLabel("Active Downloads")
         self.lbl_active.setObjectName("MainHeader")
         
-        self.btn_pause_all = QPushButton("⏸ Pause All")
+        self.btn_pause_all = QPushButton("Pause All")
         self.btn_pause_all.setObjectName("SecondaryButton")
         self.btn_pause_all.setCursor(Qt.PointingHandCursor)
         
-        self.btn_resume_all = QPushButton("▶ Resume All")
+        self.btn_resume_all = QPushButton("Resume All")
         self.btn_resume_all.setObjectName("SecondaryButton")
         self.btn_resume_all.setCursor(Qt.PointingHandCursor)
         
@@ -134,7 +135,7 @@ class DownloadsView(QWidget):
         self.lbl_completed = QLabel("Completed")
         self.lbl_completed.setObjectName("MainHeader")
         
-        self.btn_clear_history = QPushButton("🗑 Clear History")
+        self.btn_clear_history = QPushButton("Clear History")
         self.btn_clear_history.setObjectName("SecondaryButton")
         self.btn_clear_history.setCursor(Qt.PointingHandCursor)
         self.btn_clear_history.clicked.connect(self.clear_history)

@@ -55,6 +55,19 @@ def init_db():
     )
     """)
     
+    # 3. Channels Cache
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS channels_cache (
+        channel_id TEXT PRIMARY KEY,
+        title TEXT,
+        username TEXT,
+        is_channel INTEGER,
+        is_group INTEGER,
+        unread_count INTEGER,
+        date TEXT
+    )
+    """)
+    
     conn.commit()
     conn.close()
 
@@ -265,8 +278,9 @@ def get_all_completed_media(channel_id=None, category=None, search=None):
     
     query = """
     SELECT m.*, 
-           COALESCE(m.channel_title, t.title, m.channel_id) as resolved_channel_title 
+           COALESCE(NULLIF(m.channel_title, ''), NULLIF(c.title, ''), NULLIF(t.title, ''), m.channel_id) as resolved_channel_title 
     FROM media_cache m
+    LEFT JOIN channels_cache c ON (c.channel_id = m.channel_id OR c.channel_id = '-100' || m.channel_id OR m.channel_id = '-100' || c.channel_id)
     LEFT JOIN tasks t ON t.channel_input LIKE '%' || m.channel_id || '%'
     WHERE m.completed=1
     """
@@ -372,3 +386,96 @@ def migrate_json_to_db():
         
     conn.commit()
     conn.close()
+
+
+def cache_channels_list(channels_list):
+    """Caches list of dialogs/channels for instant loading in Explore."""
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS channels_cache (
+        channel_id TEXT PRIMARY KEY,
+        title TEXT,
+        username TEXT,
+        is_channel INTEGER,
+        is_group INTEGER,
+        unread_count INTEGER,
+        date TEXT
+    )
+    """)
+    for ch in channels_list:
+        cursor.execute("""
+        INSERT INTO channels_cache (channel_id, title, username, is_channel, is_group, unread_count, date)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(channel_id) DO UPDATE SET
+            title=excluded.title,
+            username=excluded.username,
+            is_channel=excluded.is_channel,
+            is_group=excluded.is_group,
+            unread_count=excluded.unread_count,
+            date=excluded.date
+        """, (
+            str(ch.get("id", "")),
+            ch.get("title", ""),
+            ch.get("username", ""),
+            1 if ch.get("is_channel") else 0,
+            1 if ch.get("is_group") else 0,
+            ch.get("unread_count", 0),
+            ch.get("date", "")
+        ))
+    conn.commit()
+    conn.close()
+
+
+def get_cached_channels_list():
+    """Retrieves cached channels list from SQLite."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+    CREATE TABLE IF NOT EXISTS channels_cache (
+        channel_id TEXT PRIMARY KEY,
+        title TEXT,
+        username TEXT,
+        is_channel INTEGER,
+        is_group INTEGER,
+        unread_count INTEGER,
+        date TEXT
+    )
+    """)
+    cursor.execute("SELECT * FROM channels_cache ORDER BY title COLLATE NOCASE ASC")
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
+
+
+def cache_channel(channel_id, title="", username=""):
+    """Upserts a single channel/chat into channels_cache."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute("""
+        CREATE TABLE IF NOT EXISTS channels_cache (
+            channel_id TEXT PRIMARY KEY,
+            title TEXT,
+            username TEXT,
+            is_channel INTEGER,
+            is_group INTEGER,
+            unread_count INTEGER,
+            date TEXT
+        )
+        """)
+        cursor.execute("""
+        INSERT INTO channels_cache (channel_id, title, username, is_channel, is_group)
+        VALUES (?, ?, ?, 1, 0)
+        ON CONFLICT(channel_id) DO UPDATE SET
+            title=CASE WHEN excluded.title != '' THEN excluded.title ELSE channels_cache.title END,
+            username=CASE WHEN excluded.username != '' THEN excluded.username ELSE channels_cache.username END
+        """, (str(channel_id).replace("-100", "", 1), title, username))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"cache_channel error: {e}")
+        return False
+

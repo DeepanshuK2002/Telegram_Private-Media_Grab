@@ -5,8 +5,9 @@ from PySide6.QtWidgets import (
     QLineEdit, QComboBox, QTableWidget, QTableWidgetItem, QHeaderView,
     QAbstractItemView, QMenu, QMessageBox, QApplication, QFrame, QCheckBox
 )
-from PySide6.QtCore import Qt, Signal, QUrl
+from PySide6.QtCore import Qt, Signal, QUrl, QSize
 from PySide6.QtGui import QDesktopServices, QIcon, QColor
+from resource_utils import get_resource_path
 
 from database import (
     get_all_completed_media, delete_media_cache_item, 
@@ -14,6 +15,7 @@ from database import (
     unmark_media_completed, update_media_downloaded_path
 )
 from ui.views.settings_view import load_config
+from ui.components.clean_combobox import CleanComboBox, create_clean_menu
 
 
 def format_bytes(size_bytes):
@@ -67,7 +69,30 @@ class FileManagerView(QWidget):
         self.all_items = []
         self.channel_summaries = []
         self.setup_ui()
+        
+        # Initialize theme-appropriate icon
+        try:
+            cfg = load_config()
+            cfg_dark = cfg.get("dark_mode", None)
+            if cfg_dark is None:
+                import ui.app as main_app
+                cfg_dark = main_app.is_system_dark_mode()
+            else:
+                cfg_dark = bool(cfg_dark)
+        except Exception:
+            cfg_dark = False
+        self.update_theme(cfg_dark)
+
         self.refresh_list()
+
+    def update_theme(self, is_dark: bool):
+        self.is_dark_theme = is_dark
+        suffix = "_white.png" if is_dark else "_black.png"
+        icon_path = get_resource_path(os.path.join("assets", "icons", f"refresh{suffix}"))
+        if hasattr(self, 'btn_refresh') and os.path.exists(icon_path):
+            self.btn_refresh.setIcon(QIcon(icon_path))
+        if hasattr(self, 'all_items') and self.all_items:
+            self.apply_filter()
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -76,7 +101,7 @@ class FileManagerView(QWidget):
 
         # ── 1. Top Header & Stats ─────────────────────────────────────────────
         top_row = QHBoxLayout()
-        self.lbl_header = QLabel("📁 Downloaded Files Manager")
+        self.lbl_header = QLabel("Downloaded Files Manager")
         self.lbl_header.setObjectName("MainHeader")
 
         self.lbl_stats = QLabel("0 files (0 B)")
@@ -88,14 +113,17 @@ class FileManagerView(QWidget):
         top_row.addWidget(self.lbl_stats)
         top_row.addStretch()
 
-        self.btn_open_root = QPushButton("📂 Open Downloads Folder")
+        self.btn_open_root = QPushButton("Open Downloads Folder")
         self.btn_open_root.setObjectName("SecondaryButton")
         self.btn_open_root.setCursor(Qt.PointingHandCursor)
         self.btn_open_root.clicked.connect(self.open_downloads_folder)
 
-        self.btn_refresh = QPushButton("🔄 Refresh")
-        self.btn_refresh.setObjectName("SecondaryButton")
+        self.btn_refresh = QPushButton()
+        self.btn_refresh.setObjectName("IconButton")
+        self.btn_refresh.setFixedSize(36, 36)
+        self.btn_refresh.setIconSize(QSize(16, 16))
         self.btn_refresh.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh.setToolTip("Refresh file list")
         self.btn_refresh.clicked.connect(self.refresh_list)
 
         top_row.addWidget(self.btn_open_root)
@@ -112,18 +140,18 @@ class FileManagerView(QWidget):
 
         # Search Bar
         self.input_search = QLineEdit()
-        self.input_search.setPlaceholderText("🔍 Search by filename, ID, or channel...")
+        self.input_search.setPlaceholderText("Search by filename, ID, or channel...")
         self.input_search.textChanged.connect(self.apply_filter)
         f_layout.addWidget(self.input_search, stretch=3)
 
         # Channel Selector Dropdown
-        self.combo_channel = QComboBox()
-        self.combo_channel.addItem("📺 All Channels", "all")
+        self.combo_channel = CleanComboBox()
+        self.combo_channel.addItem("All Channels", "all")
         self.combo_channel.currentIndexChanged.connect(self.apply_filter)
         f_layout.addWidget(self.combo_channel, stretch=2)
 
         # Category Filter
-        self.combo_category = QComboBox()
+        self.combo_category = CleanComboBox()
         self.combo_category.addItems([
             "All Categories", "Images", "Videos", "Documents / PDFs", "ZIPs", "Audio"
         ])
@@ -131,9 +159,9 @@ class FileManagerView(QWidget):
         f_layout.addWidget(self.combo_category, stretch=2)
 
         # Status Filter
-        self.combo_status = QComboBox()
+        self.combo_status = CleanComboBox()
         self.combo_status.addItems([
-            "All Status", "🟢 Present on Disk", "🟡 Missing / Deleted"
+            "All Status", "Present on Disk", "Missing / Deleted"
         ])
         self.combo_status.currentIndexChanged.connect(self.apply_filter)
         f_layout.addWidget(self.combo_status, stretch=2)
@@ -150,23 +178,24 @@ class FileManagerView(QWidget):
         
         header = self.table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.Fixed) # Checkbox
-        self.table.setColumnWidth(0, 36)
+        self.table.setColumnWidth(0, 48)
         header.setSectionResizeMode(1, QHeaderView.Fixed) # Type
-        self.table.setColumnWidth(1, 46)
+        self.table.setColumnWidth(1, 56)
         header.setSectionResizeMode(2, QHeaderView.Stretch) # File Name
         header.setSectionResizeMode(3, QHeaderView.Fixed) # Channel
-        self.table.setColumnWidth(3, 150)
+        self.table.setColumnWidth(3, 170)
         header.setSectionResizeMode(4, QHeaderView.Fixed) # Size
-        self.table.setColumnWidth(4, 85)
+        self.table.setColumnWidth(4, 90)
         header.setSectionResizeMode(5, QHeaderView.Fixed) # Date
-        self.table.setColumnWidth(5, 95)
+        self.table.setColumnWidth(5, 100)
         header.setSectionResizeMode(6, QHeaderView.Fixed) # Status
         self.table.setColumnWidth(6, 95)
         header.setSectionResizeMode(7, QHeaderView.Fixed) # Actions
         self.table.setColumnWidth(7, 210)
 
+        self.table.setShowGrid(False)
         self.table.verticalHeader().setVisible(False)
-        self.table.verticalHeader().setDefaultSectionSize(40)
+        self.table.verticalHeader().setDefaultSectionSize(44)
         self.table.setSelectionBehavior(QAbstractItemView.SelectRows)
         self.table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.table.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -188,15 +217,18 @@ class FileManagerView(QWidget):
 
         bottom_bar.addStretch()
 
-        self.btn_bulk_remove_db = QPushButton("🗑 Remove from List")
+        self.btn_bulk_remove_db = QPushButton("Remove from List")
         self.btn_bulk_remove_db.setObjectName("SecondaryButton")
+        self.btn_bulk_remove_db.setFixedHeight(36)
+        self.btn_bulk_remove_db.setCursor(Qt.PointingHandCursor)
         self.btn_bulk_remove_db.setToolTip("Remove records from download history without deleting files on disk")
         self.btn_bulk_remove_db.clicked.connect(self.bulk_remove_from_list)
         bottom_bar.addWidget(self.btn_bulk_remove_db)
 
-        self.btn_bulk_delete_disk = QPushButton("❌ Delete from Disk & List")
-        self.btn_bulk_delete_disk.setObjectName("DangerButton")
-        self.btn_bulk_delete_disk.setStyleSheet("background-color: #EF4444; color: white; font-weight: 600; padding: 6px 14px; border-radius: 6px;")
+        self.btn_bulk_delete_disk = QPushButton("Delete from Disk & List")
+        self.btn_bulk_delete_disk.setObjectName("DangerGhostButton")
+        self.btn_bulk_delete_disk.setFixedHeight(36)
+        self.btn_bulk_delete_disk.setCursor(Qt.PointingHandCursor)
         self.btn_bulk_delete_disk.setToolTip("Permanently delete selected files from disk and history")
         self.btn_bulk_delete_disk.clicked.connect(self.bulk_delete_from_disk)
         bottom_bar.addWidget(self.btn_bulk_delete_disk)
@@ -214,14 +246,14 @@ class FileManagerView(QWidget):
         current_data = self.combo_channel.currentData()
         self.combo_channel.blockSignals(True)
         self.combo_channel.clear()
-        self.combo_channel.addItem("📺 All Channels", "all")
+        self.combo_channel.addItem("All Channels", "all")
 
         summaries = get_cached_channels_summary()
         for s in summaries:
             c_id = s.get("channel_id")
             c_title = s.get("channel_title") or c_id
             c_count = s.get("count", 0)
-            label = f"📢 {c_title} ({c_count})"
+            label = f"{c_title} ({c_count})"
             self.combo_channel.addItem(label, str(c_id))
 
         # Restore previous selection if possible
@@ -251,7 +283,25 @@ class FileManagerView(QWidget):
         for item in self.all_items:
             fpath, on_disk = resolve_item_disk_path(item)
             fname = item.get("title") or (os.path.basename(fpath) if fpath else f"Message_{item.get('msg_id')}")
-            chan_name = item.get("resolved_channel_title") or item.get("channel_title") or str(item.get("channel_id", ""))
+            
+            # Resolve Channel Name
+            chan_name = item.get("resolved_channel_title") or item.get("channel_title") or ""
+            if not chan_name or chan_name.isdigit():
+                if fpath:
+                    norm_path = os.path.normpath(fpath)
+                    parts = norm_path.split(os.sep)
+                    try:
+                        for idx, p in enumerate(parts):
+                            if p.lower() == "downloads" and idx + 1 < len(parts):
+                                cand = parts[idx + 1]
+                                if cand and cand.lower() not in ("all_media", "temp", "thumbnails"):
+                                    chan_name = cand
+                                    break
+                    except Exception:
+                        pass
+            if not chan_name:
+                cid = str(item.get("channel_id") or "")
+                chan_name = f"-100{cid}" if cid.isdigit() and not cid.startswith("-100") else cid
             
             # 1. Channel Filter
             if selected_chan and selected_chan != "all":
@@ -271,6 +321,18 @@ class FileManagerView(QWidget):
             if cat_idx > 0:
                 expected_cats = cat_map.get(cat_idx, [])
                 item_cat = str(item.get("media_type", "")).lower()
+                if not item_cat:
+                    ext = os.path.splitext(fname)[1].lower() if fname else ""
+                    if ext in [".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".flv", ".m4v"]:
+                        item_cat = "video"
+                    elif ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]:
+                        item_cat = "photo"
+                    elif ext in [".pdf", ".doc", ".docx", ".txt", ".xlsx", ".pptx"]:
+                        item_cat = "pdf"
+                    elif ext in [".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"]:
+                        item_cat = "zip"
+                    elif ext in [".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wav"]:
+                        item_cat = "audio"
                 if item_cat not in expected_cats:
                     continue
 
@@ -292,31 +354,72 @@ class FileManagerView(QWidget):
         self.table.setRowCount(len(filtered_items))
 
         type_icons = {
-            "photo": "🖼️", "image": "🖼️", "images": "🖼️",
-            "video": "🎬", "videos": "🎬",
-            "pdf": "📄", "pdfs": "📄", "document": "📄", "documents": "📄",
-            "zip": "📦", "zips": "📦",
-            "audio": "🎵", "music": "🎵", "voice": "🎙️"
+            "photo": "IMG", "image": "IMG", "images": "IMG",
+            "video": "VID", "videos": "VID",
+            "pdf": "DOC", "pdfs": "DOC", "document": "DOC", "documents": "DOC",
+            "zip": "ZIP", "zips": "ZIP",
+            "audio": "AUD", "music": "AUD", "voice": "VOX"
         }
 
         for row, (item, fname, chan_name, fpath, on_disk) in enumerate(filtered_items):
-            # 0. Checkbox
+            # 0. Checkbox (Centered with zero margin, no clipping)
             chk = QCheckBox()
             chk.setProperty("row_item", item)
             chk.stateChanged.connect(self.update_selected_count)
             chk_widget = QWidget()
             chk_layout = QHBoxLayout(chk_widget)
-            chk_layout.setContentsMargins(8, 0, 0, 0)
+            chk_layout.setContentsMargins(0, 0, 0, 0)
             chk_layout.addWidget(chk)
             chk_layout.setAlignment(Qt.AlignCenter)
             self.table.setCellWidget(row, 0, chk_widget)
 
-            # 1. Type Icon
-            m_type = str(item.get("media_type", "")).lower()
-            icon_str = type_icons.get(m_type, "📁")
-            item_type = QTableWidgetItem(icon_str)
-            item_type.setTextAlignment(Qt.AlignCenter)
-            self.table.setItem(row, 1, item_type)
+            # 1. Type Badge (Visual Pill Badge)
+            m_type = str(item.get("media_type") or "").lower()
+            ext = os.path.splitext(fname)[1].lower() if fname else ""
+            is_dark = getattr(self, "is_dark_theme", False)
+
+            if m_type in ("video", "videos") or ext in [".mp4", ".mkv", ".avi", ".mov", ".webm", ".ts", ".flv", ".m4v"]:
+                icon_str = "VID"
+                badge_bg = "#1E293B" if is_dark else "#EFF6FF"
+                badge_fg = "#60A5FA" if is_dark else "#2563EB"
+            elif m_type in ("photo", "image", "images") or ext in [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"]:
+                icon_str = "IMG"
+                badge_bg = "#362B15" if is_dark else "#FEF3C7"
+                badge_fg = "#FBBF24" if is_dark else "#D97706"
+            elif m_type in ("pdf", "pdfs", "document", "documents") or ext in [".pdf", ".doc", ".docx", ".txt", ".xlsx", ".pptx"]:
+                icon_str = "DOC"
+                badge_bg = "#064E3B" if is_dark else "#ECFDF5"
+                badge_fg = "#34D399" if is_dark else "#059669"
+            elif m_type in ("zip", "zips", "archive") or ext in [".zip", ".rar", ".7z", ".tar", ".gz", ".bz2"]:
+                icon_str = "ZIP"
+                badge_bg = "#2E1065" if is_dark else "#F5F3FF"
+                badge_fg = "#A78BFA" if is_dark else "#7C3AED"
+            elif m_type in ("audio", "music", "voice") or ext in [".mp3", ".m4a", ".flac", ".ogg", ".opus", ".wav"]:
+                icon_str = "AUD"
+                badge_bg = "#083344" if is_dark else "#ECFEFF"
+                badge_fg = "#22D3EE" if is_dark else "#0891B2"
+            else:
+                icon_str = type_icons.get(m_type, "FILE")
+                badge_bg = "#27272A" if is_dark else "#F4F4F5"
+                badge_fg = "#A1A1AA" if is_dark else "#71717A"
+
+            type_widget = QWidget()
+            t_layout = QHBoxLayout(type_widget)
+            t_layout.setContentsMargins(0, 0, 0, 0)
+            t_layout.setAlignment(Qt.AlignCenter)
+            lbl_type_badge = QLabel(icon_str)
+            lbl_type_badge.setAlignment(Qt.AlignCenter)
+            lbl_type_badge.setFixedSize(38, 22)
+            lbl_type_badge.setStyleSheet(f"""
+                background-color: {badge_bg};
+                color: {badge_fg};
+                font-size: 10px;
+                font-weight: 700;
+                border-radius: 4px;
+                padding: 1px 4px;
+            """)
+            t_layout.addWidget(lbl_type_badge)
+            self.table.setCellWidget(row, 1, type_widget)
 
             # 2. File Name
             item_name = QTableWidgetItem(fname)
@@ -335,14 +438,26 @@ class FileManagerView(QWidget):
             item_size.setTextAlignment(Qt.AlignRight | Qt.AlignVCenter)
             self.table.setItem(row, 4, item_size)
 
-            # 5. Date
-            date_str = str(item.get("date") or "")[:10]
+            # 5. Date (Resolved from item date, filename prefix, or disk mtime)
+            date_raw = str(item.get("date") or "").strip()
+            if date_raw and date_raw != "None":
+                date_str = date_raw[:10]
+            else:
+                import re, datetime
+                m = re.match(r"^(\d{4}[-_]\d{2}[-_]\d{2})", fname)
+                if m:
+                    date_str = m.group(1).replace("_", "-")
+                elif on_disk and fpath and os.path.exists(fpath):
+                    mtime = os.path.getmtime(fpath)
+                    date_str = datetime.datetime.fromtimestamp(mtime).strftime("%Y-%m-%d")
+                else:
+                    date_str = "-"
             item_date = QTableWidgetItem(date_str)
             item_date.setTextAlignment(Qt.AlignCenter)
             self.table.setItem(row, 5, item_date)
 
             # 6. Status Badge
-            status_text = "🟢 On Disk" if on_disk else "🟡 Missing"
+            status_text = "On Disk" if on_disk else "Missing"
             item_status = QTableWidgetItem(status_text)
             item_status.setTextAlignment(Qt.AlignCenter)
             if not on_disk:
@@ -358,29 +473,33 @@ class FileManagerView(QWidget):
             act_layout.setSpacing(4)
 
             if on_disk:
-                btn_open = QPushButton("📂 Open")
+                btn_open = QPushButton("Play")
                 btn_open.setObjectName("CardButtonCompact")
+                btn_open.setFixedHeight(22)
                 btn_open.setCursor(Qt.PointingHandCursor)
-                btn_open.setToolTip("Open this file")
+                btn_open.setToolTip("Play this file")
                 btn_open.clicked.connect(lambda checked=False, p=fpath: self.open_file(p))
                 act_layout.addWidget(btn_open)
 
-                btn_folder = QPushButton("📁 Folder")
+                btn_folder = QPushButton("Folder")
                 btn_folder.setObjectName("CardButtonCompact")
+                btn_folder.setFixedHeight(22)
                 btn_folder.setCursor(Qt.PointingHandCursor)
                 btn_folder.setToolTip("Show file in folder")
                 btn_folder.clicked.connect(lambda checked=False, p=fpath: self.show_in_folder(p))
                 act_layout.addWidget(btn_folder)
             else:
-                btn_re = QPushButton("🔄 Re-fetch")
+                btn_re = QPushButton("Re-fetch")
                 btn_re.setObjectName("CardButtonCompact")
+                btn_re.setFixedHeight(22)
                 btn_re.setCursor(Qt.PointingHandCursor)
                 btn_re.setToolTip("Mark for re-download")
                 btn_re.clicked.connect(lambda checked=False, it=item: self.redownload_item(it))
                 act_layout.addWidget(btn_re)
 
-            btn_del = QPushButton("🗑")
-            btn_del.setObjectName("CardButtonCompact")
+            btn_del = QPushButton("Delete")
+            btn_del.setObjectName("CardButtonCompactDanger")
+            btn_del.setFixedHeight(22)
             btn_del.setCursor(Qt.PointingHandCursor)
             btn_del.setToolTip("Delete / Remove item")
             btn_del.clicked.connect(lambda checked=False, it=item, p=fpath, od=on_disk: self.prompt_delete_item(it, p, od))
@@ -541,25 +660,25 @@ class FileManagerView(QWidget):
         if not data: return
         item_dict, fpath, on_disk = data
 
-        menu = QMenu(self)
+        menu = create_clean_menu(self)
         if on_disk:
-            action_open = menu.addAction("📂 Open File")
-            action_folder = menu.addAction("📁 Show in File Explorer")
-            action_copy_path = menu.addAction("📋 Copy Full Path")
+            action_open = menu.addAction("Open File")
+            action_folder = menu.addAction("Show in File Explorer")
+            action_copy_path = menu.addAction("Copy Full Path")
             menu.addSeparator()
         else:
             action_open = None
             action_folder = None
             action_copy_path = None
-            action_redownload = menu.addAction("🔄 Mark for Re-download")
+            action_redownload = menu.addAction("Mark for Re-download")
             menu.addSeparator()
 
-        action_copy_name = menu.addAction("📋 Copy File Name")
+        action_copy_name = menu.addAction("Copy File Name")
         menu.addSeparator()
-        action_remove_db = menu.addAction("🗑 Remove from Download List (Keep on Disk)")
+        action_remove_db = menu.addAction("Remove from Download List (Keep on Disk)")
         
         if on_disk:
-            action_delete_disk = menu.addAction("❌ Delete File from Disk & List")
+            action_delete_disk = menu.addAction("Delete File from Disk & List")
         else:
             action_delete_disk = None
 

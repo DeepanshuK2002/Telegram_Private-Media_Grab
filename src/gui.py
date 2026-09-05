@@ -1,7 +1,7 @@
 import os
 import sys
 
-APP_VERSION = "2.8.2"
+APP_VERSION = "2.9.0"
 
 # We add src to path so absolute imports within src work cleanly
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -32,7 +32,7 @@ def main():
     try:
         if os.name == 'nt':
             import ctypes
-            myappid = f'vinodkumar.tgdownloader.{APP_VERSION}'
+            myappid = f'tgprivategrab.downloader.{APP_VERSION}'
             ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(myappid)
     except Exception:
         pass

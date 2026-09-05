@@ -1,7 +1,7 @@
-# Telegram Bulk Media Downloader
+# TG Private Grab
 
-[![GitHub Release](https://img.shields.io/github/v/release/vinodkr494/telegram-media-downloader?style=flat-square)](https://github.com/vinodkr494/telegram-media-downloader/releases/latest)
-[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/vinodkr494/telegram-media-downloader/total?style=flat-square)](https://github.com/vinodkr494/telegram-media-downloader/releases)
+[![GitHub Release](https://img.shields.io/github/v/release/DeepanshuK2002/Telegram_Private-Media_Grab?style=flat-square)](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/releases/latest)
+[![GitHub Downloads (all assets, all releases)](https://img.shields.io/github/downloads/DeepanshuK2002/Telegram_Private-Media_Grab/total?style=flat-square)](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/releases)
 🚀 **Bulk-download videos, images, PDFs, audio & more** from any Telegram channel or group. Features a **Premium PySide6 Dashboard** with high-performance analytics, **Global Queue Tracking** (Total progress % & Session usage), **Advanced Task Management** (Prioritize & Cancel), category browser, real-time search, parallel downloads, smart deduplication, speed limiter, proxy support, and desktop notifications.
 
 ### 🗄️ SQLite Persistence Engine
@@ -94,8 +94,8 @@ All downloaded media (images, videos, documents, audio) can now be automatically
 
 ### Method 1: Download the Executable (Recommended)
 
-1. Go to the [Releases](https://github.com/vinodkr494/telegram-media-downloader/releases) page.
-2. Download the latest `TGDownloader-vX.X.X-Windows.exe` (or your OS version).
+1. Go to the [Releases](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/releases) page.
+2. Download the latest `TGPrivateGrab-vX.X.X.exe`.
 3. Run directly — no Python or installation required!
 
 > **Note:** Windows may show a "Smart App Control" warning because the executable is unsigned. Click **More info → Run anyway**.
@@ -105,8 +105,8 @@ All downloaded media (images, videos, documents, audio) can now be automatically
 1. Clone the repository:
 
     ```bash
-    git clone https://github.com/vinodkr494/telegram-media-downloader.git
-    cd telegram-media-downloader
+    git clone https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab.git
+    cd Telegram_Private-Media_Grab
     ```
 
 2. Install dependencies:
@@ -120,7 +120,7 @@ All downloaded media (images, videos, documents, audio) can now be automatically
     ```env
     API_ID=your_api_id
     API_HASH=your_api_hash
-    SESSION_NAME=default_session
+    PHONE=+15551234567
     ```
 
 4. Run the GUI:
@@ -304,7 +304,7 @@ Go to **Settings → Download Limit** to adjust how many files download simultan
 
 We are currently focused entirely on stabilizing and improving the robustness of existing features.
 
-If you have an idea or suggestion for a new feature, please join our [GitHub Discussions (Ideas)](https://github.com/vinodkr494/telegram-media-downloader/discussions/categories/ideas) instead of opening an issue. Issues are now strictly reserved for bug reports.
+If you have an idea or suggestion for a new feature, please join our [GitHub Discussions (Ideas)](https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab/discussions/categories/ideas) instead of opening an issue. Issues are now strictly reserved for bug reports.
 
 ## ⚠️ Legal Disclaimer
 
@@ -347,6 +347,8 @@ This project is licensed under the MIT License. See the [LICENSE](LICENSE) file 
 
 Our mission is to bridge the gap between complex terminal-based downloaders and the user-friendly experience that modern creators and researchers deserve. By combining the robust [Telethon](https://github.com/LonamiWebs/Telethon) engine with a world-class **PySide6 Dashboard**, we've created a tool that is both incredibly powerful and effortless to use.
 
+**TG Private Grab** is the rebranded, Windows-first successor of this project, with a Telegram-inspired UI, new logo suite, and silent in-app auto-updates.
+
 ---
 
 ## ☕ Support & Donation
@@ -354,12 +356,11 @@ Our mission is to bridge the gap between complex terminal-based downloaders and 
 If you find this tool helpful and want to support its continued development, please consider:
 
 - **⭐ Star this repository** to help others find it.
-- **💖 Sponsor on GitHub**: [Sponsor @vinodkr494](https://github.com/sponsors/vinodkr494)
 
 Your support helps cover the costs of testing, maintenance, and new features!
 
 ---
 
-Made with ❤️ by [Vinod Kumar](https://github.com/vinodkr494).
+Made with ❤️ by [Deepanshu](https://github.com/DeepanshuK2002).
 
-[![Star History Chart](https://api.star-history.com/svg?repos=vinodkr494/telegram-media-downloader&type=Date)](https://star-history.com/#vinodkr494/telegram-media-downloader&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=DeepanshuK2002/Telegram_Private-Media_Grab&type=Date)](https://star-history.com/#DeepanshuK2002/Telegram_Private-Media_Grab&Date)

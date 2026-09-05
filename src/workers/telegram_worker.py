@@ -36,6 +36,14 @@ class WorkerSignals(QObject):
     download_completed = Signal(str, str) # task_id, folder_name
     error_occurred = Signal(str, str) # task_id, error_msg
 
+    # Explore Signals
+    dialogs_fetched = Signal(list) # list of channel/chat dicts
+    channel_videos_fetched = Signal(str, list) # channel_id, list of video dicts
+    explore_loading = Signal(bool, str) # is_loading, status_text
+    explore_error = Signal(str) # error_msg
+    avatar_ready = Signal(str, str) # channel_id, file_path
+    thumbnail_ready = Signal(str, int, str) # channel_id, msg_id, file_path
+
 
 class TelegramWorker(QThread):
     def __init__(self, session_name, api_id, api_hash, parent=None):
@@ -48,6 +56,9 @@ class TelegramWorker(QThread):
         self.client = None
         self.task_cancel_events = {}
         self.running_tasks = {} # task_id -> future or task
+
+    def get_client(self):
+        return self.client
 
     def run(self):
         """Thread entry point. Starts the asyncio event loop."""
@@ -122,10 +133,7 @@ class TelegramWorker(QThread):
                 print("DEBUG: check_auth: NOT authorized, emitting auth_needed")
                 self.signals.auth_needed.emit()
             else:
-                # Pre-fetch dialogs to populate entity cache (helps resolving numeric IDs)
-                print("DEBUG: check_auth: authorized, pre-fetching dialogs...")
-                await self.client.get_dialogs(limit=50)
-                print("DEBUG: check_auth: pre-fetch done, emitting auth_success")
+                print("DEBUG: check_auth: authorized, emitting auth_success")
                 self.signals.auth_success.emit()
         except Exception as e:
             print(f"DEBUG: check_auth error: {e}")
@@ -211,6 +219,331 @@ class TelegramWorker(QThread):
             self.signals.media_list_fetched.emit(channel_input, channel, messages_dict)
         except Exception as e:
             self.signals.error_occurred.emit(channel_input, f"Fetch Error: {str(e)}")
+
+    def fetch_user_dialogs(self):
+        """Fetches all channels and groups for the current Telegram account."""
+        if not self.loop or not self.client:
+            return
+        asyncio.run_coroutine_threadsafe(self._fetch_user_dialogs_coro(), self.loop)
+
+    async def _fetch_user_dialogs_coro(self):
+        try:
+            self.signals.explore_loading.emit(True, "Loading channels...")
+            if not self.client.is_connected():
+                await self.client.connect()
+            if not await self.client.is_user_authorized():
+                self.signals.explore_error.emit("Telegram session not authorized.")
+                self.signals.explore_loading.emit(False, "")
+                return
+
+            dialogs = await self.client.get_dialogs(limit=150)
+            result = []
+            for d in dialogs:
+                is_ch = getattr(d, 'is_channel', False)
+                is_grp = getattr(d, 'is_group', False)
+                is_user = getattr(d, 'is_user', False)
+                entity = d.entity
+                uname = getattr(entity, 'username', '') or ''
+                title = d.name or getattr(entity, 'title', '') or getattr(entity, 'first_name', '') or "Untitled"
+                
+                result.append({
+                    "id": str(d.id),
+                    "raw_id": d.id,
+                    "title": title,
+                    "username": f"@{uname}" if uname else "",
+                    "is_channel": is_ch,
+                    "is_group": is_grp,
+                    "is_user": is_user,
+                    "unread_count": getattr(d, 'unread_count', 0),
+                    "date": d.date.strftime("%b %d") if getattr(d, 'date', None) else "",
+                })
+            
+            # Cache in SQLite for instant reload next time
+            from database import cache_channels_list
+            try:
+                cache_channels_list(result)
+            except Exception as ce:
+                print(f"DEBUG: cache_channels_list error: {ce}")
+
+            self.signals.dialogs_fetched.emit(result)
+            self.signals.explore_loading.emit(False, "")
+
+            # Start background avatar downloads
+            asyncio.create_task(self._fetch_avatars_coro(dialogs))
+        except Exception as e:
+            print(f"DEBUG: fetch_user_dialogs error: {e}")
+            self.signals.explore_error.emit(str(e))
+            self.signals.explore_loading.emit(False, "")
+
+    async def _fetch_avatars_coro(self, dialogs):
+        from resource_utils import get_project_root
+        avatar_dir = os.path.join(get_project_root(), "cache", "avatars")
+        os.makedirs(avatar_dir, exist_ok=True)
+        sem = asyncio.Semaphore(4)
+
+        async def fetch_one(d):
+            cid = str(d.id).replace("-100", "", 1) if str(d.id).startswith("-100") else str(d.id)
+            avatar_path = os.path.join(avatar_dir, f"{cid}.jpg")
+            if os.path.exists(avatar_path) and os.path.getsize(avatar_path) > 0:
+                # Already on disk, UI already loaded it directly
+                return
+
+            entity = getattr(d, 'entity', None)
+            if not entity:
+                return
+
+            if not getattr(entity, 'photo', None) and not getattr(entity, 'chat_photo', None):
+                return
+
+            async with sem:
+                try:
+                    path = await self.client.download_profile_photo(
+                        entity, 
+                        file=avatar_path, 
+                        download_big=False
+                    )
+                    if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                        self.signals.avatar_ready.emit(str(d.id), path)
+                except Exception:
+                    pass
+
+        tasks = [fetch_one(d) for d in dialogs[:60] if d]
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+    def fetch_channel_avatar(self, channel_id):
+        """Requests avatar download for a specific channel ID."""
+        if not self.loop or not self.client:
+            return
+        asyncio.run_coroutine_threadsafe(self._fetch_single_avatar_coro(channel_id), self.loop)
+
+    async def _fetch_single_avatar_coro(self, channel_id):
+        from resource_utils import get_project_root
+        avatar_dir = os.path.join(get_project_root(), "cache", "avatars")
+        os.makedirs(avatar_dir, exist_ok=True)
+        clean_cid = str(channel_id).replace("-100", "", 1) if str(channel_id).startswith("-100") else str(channel_id)
+        avatar_path = os.path.join(avatar_dir, f"{clean_cid}.jpg")
+        if os.path.exists(avatar_path) and os.path.getsize(avatar_path) > 0:
+            self.signals.avatar_ready.emit(str(channel_id), avatar_path)
+            return
+        try:
+            clean_id, _ = parse_channel_input(channel_id)
+            channel = await fetch_channel(self.client, clean_id)
+            path = await self.client.download_profile_photo(channel, file=avatar_path, download_big=False)
+            if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                self.signals.avatar_ready.emit(str(channel_id), path)
+        except Exception:
+            pass
+
+    def fetch_channel_videos(self, channel_id, limit=300):
+        """Fetches video messages for a specific channel/chat."""
+        if not self.loop or not self.client:
+            return
+        asyncio.run_coroutine_threadsafe(self._fetch_channel_videos_coro(channel_id, limit), self.loop)
+
+    async def _fetch_channel_videos_coro(self, channel_id, limit=300):
+        try:
+            self.signals.explore_loading.emit(True, "Fetching videos...")
+            clean_id, topic_id = parse_channel_input(channel_id)
+            channel = await fetch_channel(self.client, clean_id)
+
+            # Ensure channel avatar is fetched and cached
+            try:
+                from resource_utils import get_project_root
+                avatar_dir = os.path.join(get_project_root(), "cache", "avatars")
+                os.makedirs(avatar_dir, exist_ok=True)
+                clean_cid = str(channel_id).replace("-100", "", 1) if str(channel_id).startswith("-100") else str(channel_id)
+                avatar_path = os.path.join(avatar_dir, f"{clean_cid}.jpg")
+                if not os.path.exists(avatar_path) or os.path.getsize(avatar_path) == 0:
+                    path = await self.client.download_profile_photo(channel, file=avatar_path, download_big=False)
+                    if path and os.path.exists(path) and os.path.getsize(path) > 0:
+                        self.signals.avatar_ready.emit(str(channel_id), path)
+                else:
+                    self.signals.avatar_ready.emit(str(channel_id), avatar_path)
+            except Exception:
+                pass
+            
+            from telethon.tl.types import InputMessagesFilterVideo, InputMessagesFilterDocument
+            
+            kwargs = {}
+            if topic_id is not None:
+                kwargs['reply_to'] = topic_id
+                
+            # 🚀 Fire both message requests in parallel — halves channel load time
+            native_vids_coro = self.client.get_messages(channel, limit=limit, filter=InputMessagesFilterVideo(), **kwargs)
+            doc_msgs_coro = self.client.get_messages(channel, limit=min(limit, 100), filter=InputMessagesFilterDocument(), **kwargs)
+            native_vids, doc_msgs = await asyncio.gather(native_vids_coro, doc_msgs_coro)
+            doc_vids = [
+                m for m in doc_msgs 
+                if m.document and (
+                    (getattr(m.document, 'mime_type', '') or '').startswith('video/') or 
+                    any(attr for attr in getattr(m.document, 'attributes', []) if hasattr(attr, 'duration'))
+                )
+            ]
+            
+            # Combine and deduplicate by message id
+            all_msgs_map = {}
+            for m in list(native_vids) + doc_vids:
+                if m and m.id and m.id not in all_msgs_map:
+                    all_msgs_map[m.id] = m
+                    
+            sorted_msgs = sorted(all_msgs_map.values(), key=lambda m: m.id, reverse=True)
+            
+            videos_list = []
+            ch_title = getattr(channel, 'title', getattr(channel, 'first_name', str(channel_id)))
+            
+            for m in sorted_msgs:
+                fname = ""
+                if m.file and m.file.name:
+                    fname = m.file.name
+                elif m.file and m.file.ext:
+                    fname = f"video_{m.id}{m.file.ext}"
+                else:
+                    fname = f"video_{m.id}.mp4"
+                
+                fsize = 0
+                if m.file and m.file.size:
+                    fsize = m.file.size
+                elif m.document and m.document.size:
+                    fsize = m.document.size
+                    
+                duration_sec = 0
+                width = 0
+                height = 0
+                if m.document and hasattr(m.document, 'attributes'):
+                    for attr in m.document.attributes:
+                        if hasattr(attr, 'duration'):
+                            duration_sec = attr.duration
+                        if hasattr(attr, 'w') and hasattr(attr, 'h'):
+                            width = attr.w
+                            height = attr.h
+                            
+                if duration_sec:
+                    mins, secs = divmod(int(duration_sec), 60)
+                    hours, mins = divmod(mins, 60)
+                    if hours > 0:
+                        dur_str = f"{hours}:{mins:02d}:{secs:02d}"
+                    else:
+                        dur_str = f"{mins}:{secs:02d}"
+                else:
+                    dur_str = ""
+                    
+                date_val = getattr(m, 'date', None)
+                date_str = date_val.strftime("%b %d, %Y") if date_val else ""
+                caption = (m.message or "").strip()
+                
+                videos_list.append({
+                    "id": m.id,
+                    "channel_id": str(channel_id),
+                    "channel_title": ch_title,
+                    "filename": fname,
+                    "title": caption if caption else fname,
+                    "caption": caption,
+                    "size_bytes": fsize,
+                    "duration_sec": duration_sec,
+                    "duration_str": dur_str,
+                    "resolution": f"{width}x{height}" if width and height else "",
+                    "date_str": date_str,
+                    "msg_obj": m,
+                })
+                
+            self.signals.channel_videos_fetched.emit(str(channel_id), videos_list)
+            self.signals.explore_loading.emit(False, "")
+
+            # Schedule background thumbnail download for these videos on the worker loop
+            real_msgs = [v.get("msg_obj") for v in videos_list if v.get("msg_obj")]
+            if real_msgs:
+                asyncio.create_task(self._fetch_channel_thumbnails_coro(clean_id, real_msgs))
+        except Exception as e:
+            print(f"DEBUG: fetch_channel_videos error: {e}")
+            self.signals.explore_error.emit(f"Error fetching videos: {str(e)}")
+            self.signals.explore_loading.emit(False, "")
+
+    def fetch_channel_thumbnails(self, channel_id, messages):
+        """Fetches high quality thumbnails for the given channel videos in the background."""
+        if self.loop and self.client:
+            asyncio.run_coroutine_threadsafe(self._fetch_channel_thumbnails_coro(channel_id, messages), self.loop)
+
+    async def _fetch_channel_thumbnails_coro(self, channel_id, messages):
+        if not self.client or not messages:
+            return
+        try:
+            from resource_utils import get_project_root
+            from telethon.tl import types
+            from telethon import utils
+            thumb_dir = os.path.join(get_project_root(), "cache", "thumbnails")
+            os.makedirs(thumb_dir, exist_ok=True)
+            clean_cid = str(channel_id).replace("-100", "", 1) if str(channel_id).startswith("-100") else str(channel_id)
+
+            sem = asyncio.Semaphore(4)
+
+            async def download_one(msg):
+                if not msg or not getattr(msg, 'id', None):
+                    return
+                cache_file = os.path.join(thumb_dir, f"{clean_cid}_{msg.id}.jpg")
+
+                # If already cached and has real thumbnail size (> 2048 bytes), emit immediately
+                if os.path.exists(cache_file) and os.path.getsize(cache_file) > 2048:
+                    self.signals.thumbnail_ready.emit(str(channel_id), msg.id, cache_file)
+                    return
+
+                async with sem:
+                    try:
+                        downloaded = False
+                        
+                        # 1. Best PhotoSize from document.thumbs (skip VideoSize which is an mp4/video)
+                        if getattr(msg, 'document', None):
+                            thumbs = getattr(msg.document, 'thumbs', None) or []
+                            photo_thumbs = [
+                                t for t in thumbs 
+                                if isinstance(t, (types.PhotoSize, types.PhotoSizeProgressive))
+                            ]
+                            if photo_thumbs:
+                                photo_thumbs.sort(key=lambda t: getattr(t, 'size', 0) or (getattr(t, 'w', 0) * getattr(t, 'h', 0)))
+                                best_thumb = photo_thumbs[-1]
+                                res = await self.client.download_media(msg, file=cache_file, thumb=best_thumb)
+                                if res and os.path.exists(cache_file) and os.path.getsize(cache_file) > 1000:
+                                    downloaded = True
+
+                        # 2. If msg is a photo
+                        if not downloaded and getattr(msg, 'photo', None):
+                            try:
+                                res = await self.client.download_media(msg.photo, file=cache_file, thumb=-1)
+                                if res and os.path.exists(cache_file) and os.path.getsize(cache_file) > 1000:
+                                    downloaded = True
+                            except Exception:
+                                pass
+
+                        # 3. Try standard download_media with thumb=-1
+                        if not downloaded and getattr(msg, 'media', None):
+                            try:
+                                res = await self.client.download_media(msg, file=cache_file, thumb=-1)
+                                if res and os.path.exists(cache_file) and os.path.getsize(cache_file) > 1000:
+                                    downloaded = True
+                            except Exception:
+                                pass
+
+                        # 4. Fallback to stripped thumb if no high-res thumb is available on Telegram
+                        if not downloaded and getattr(msg, 'document', None):
+                            thumbs = getattr(msg.document, 'thumbs', None) or []
+                            for th in thumbs:
+                                if isinstance(th, types.PhotoStrippedSize) and th.bytes:
+                                    jpg_bytes = utils.stripped_photo_to_jpg(th.bytes)
+                                    with open(cache_file, "wb") as f:
+                                        f.write(jpg_bytes)
+                                    downloaded = True
+                                    break
+
+                        if downloaded and os.path.exists(cache_file) and os.path.getsize(cache_file) > 0:
+                            self.signals.thumbnail_ready.emit(str(channel_id), msg.id, cache_file)
+                    except Exception as err:
+                        print(f"DEBUG: Error downloading thumbnail for msg {msg.id}: {err}")
+
+            tasks = [download_one(m) for m in messages if m]
+            if tasks:
+                await asyncio.gather(*tasks, return_exceptions=True)
+        except Exception as e:
+            print(f"DEBUG: _fetch_channel_thumbnails_coro error: {e}")
 
     def start_download(self, channel_input, media_id, download_path, download_limit, max_speed_kb, is_paused=False, selected_message_ids=None, task_id=None):
         """Called from Main UI Thread. Schedules download in asyncio loop."""
@@ -440,7 +773,7 @@ class TelegramWorker(QThread):
             # 2. Emit placeholder so the card appears (using the stable numeric task_id)
             self.signals.channel_fetched.emit({
                 "task_id": task_id,
-                "title": f"⏳ Loading... ({title})",
+                "title": f"Loading... ({title})",
                 "total_items": 0,
                 "completed": 0,
                 "folder_name": download_path,
