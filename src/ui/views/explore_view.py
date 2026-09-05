@@ -462,9 +462,34 @@ class ExploreView(QWidget):
 
     def load_cached_channels(self):
         cached = get_cached_channels_list()
-        if cached:
-            self.all_channels = cached
-            self.filter_channels()
+        if not cached:
+            return
+
+        normalized = []
+        for ch in cached:
+            cid = str(ch.get("channel_id") or ch.get("id") or "").strip()
+            if not cid:
+                continue
+            # cache_channel() stores ids without the -100 prefix; add it back
+            full_id = f"-100{cid}" if cid.isdigit() and not cid.startswith("-") else cid
+            uname = str(ch.get("username") or "").strip()
+            # Keep only real @usernames; cache rows created by the media-fetch
+            # path sometimes put a raw numeric id into this column.
+            uname = uname if (uname.startswith("@") and len(uname) > 1) else ""
+            normalized.append({
+                "id": full_id,
+                "raw_id": full_id,
+                "title": ch.get("title") or "Untitled",
+                "username": uname,
+                "is_channel": bool(ch.get("is_channel")),
+                "is_group": bool(ch.get("is_group")),
+                "is_user": False,
+                "unread_count": ch.get("unread_count", 0),
+                "date": ch.get("date") or "",
+            })
+
+        self.all_channels = normalized
+        self.filter_channels()
 
     def setup_ui(self):
         root_layout = QHBoxLayout(self)
@@ -618,7 +643,9 @@ class ExploreView(QWidget):
         right_layout.addWidget(self.top_bar)
 
         # ── 2. Video Search & Filter Toolbar ─────────────────────────────────
-        toolbar = QHBoxLayout()
+        self.toolbar_widget = QWidget()
+        toolbar = QHBoxLayout(self.toolbar_widget)
+        toolbar.setContentsMargins(0, 0, 0, 0)
         toolbar.setSpacing(10)
 
         self.search_videos = QLineEdit()
@@ -633,7 +660,7 @@ class ExploreView(QWidget):
         self.combo_sort.currentIndexChanged.connect(self.apply_video_sort)
         toolbar.addWidget(self.combo_sort, stretch=1)
 
-        right_layout.addLayout(toolbar)
+        right_layout.addWidget(self.toolbar_widget)
 
         # ── 3. Notification Banner (Toast) ───────────────────────────────────
         self.banner = QFrame()
@@ -660,6 +687,27 @@ class ExploreView(QWidget):
         b_layout.addWidget(self.btn_view_queue)
         self.banner.hide()
         right_layout.addWidget(self.banner)
+
+        # ── 4a. Empty Placeholder (shown until a channel is selected) ─────────
+        self.right_placeholder = QWidget()
+        ph_layout = QVBoxLayout(self.right_placeholder)
+        ph_layout.setContentsMargins(24, 24, 24, 24)
+        ph_layout.setAlignment(Qt.AlignCenter)
+        ph_layout.setSpacing(6)
+
+        self.lbl_ph_title = QLabel("Select a channel to explore media")
+        self.lbl_ph_title.setAlignment(Qt.AlignCenter)
+        self.lbl_ph_title.setStyleSheet("font-size: 16px; font-weight: 600; color: #09090B;")
+        self.lbl_ph_title.setWordWrap(True)
+
+        self.lbl_ph_sub = QLabel("No channel is selected.")
+        self.lbl_ph_sub.setObjectName("MutedText")
+        self.lbl_ph_sub.setAlignment(Qt.AlignCenter)
+        self.lbl_ph_sub.setWordWrap(True)
+
+        ph_layout.addWidget(self.lbl_ph_title)
+        ph_layout.addWidget(self.lbl_ph_sub)
+        right_layout.addWidget(self.right_placeholder, stretch=1)
 
         # ── 4. Main Video Cards Area (Scroll Area with Grid) ─────────────────
         self.scroll_area = QScrollArea()
@@ -723,6 +771,8 @@ class ExploreView(QWidget):
 
         # Initialize refresh icons
         self.update_theme(self.is_dark_theme)
+        # Right panel shows only a hint until a channel is selected
+        self._update_right_placeholder()
 
     def update_theme(self, is_dark: bool):
         self.is_dark_theme = is_dark
@@ -753,6 +803,12 @@ class ExploreView(QWidget):
                     padding: 2px 10px;
                 }}
             """)
+
+        # Update placeholder hint colors per theme
+        ph_title_color = "#EDEDED" if is_dark else "#09090B"
+        ph_sub_color = "#A1A1AA" if is_dark else "#71717A"
+        self.lbl_ph_title.setStyleSheet(f"font-size: 16px; font-weight: 600; color: {ph_title_color};")
+        self.lbl_ph_sub.setStyleSheet(f"font-size: 12px; color: {ph_sub_color};")
 
         # Update all video cards with new theme
         for card in self.video_cards.values():
@@ -852,6 +908,25 @@ class ExploreView(QWidget):
         self.lbl_empty_state.setText(f"⚠️ {err_msg}")
         self.stack_videos.setCurrentIndex(0)
 
+    def _update_right_placeholder(self):
+        """Before any channel is chosen, the right panel shows only a hint."""
+        has_channel = bool(self.current_channel_id)
+        self.right_placeholder.setVisible(not has_channel)
+
+        if has_channel:
+            self.top_bar.show()
+            self.toolbar_widget.show()
+            if self.banner.isVisible():
+                self.banner.show()
+            self.stack_videos.show()
+            self.bottom_bar.show()
+        else:
+            self.top_bar.hide()
+            self.toolbar_widget.hide()
+            self.banner.hide()
+            self.stack_videos.hide()
+            self.bottom_bar.hide()
+
     def on_channel_item_clicked(self, item):
         data = item.data(Qt.UserRole)
         if not data:
@@ -860,6 +935,9 @@ class ExploreView(QWidget):
         self.current_channel_id = str(data["id"])
         self.current_channel_data = data
         
+        # Show the interactive right panel once a channel is selected
+        self._update_right_placeholder()
+
         # Update top bar title
         title = data.get("title", "Untitled")
         self.lbl_active_channel_title.setText(title)
