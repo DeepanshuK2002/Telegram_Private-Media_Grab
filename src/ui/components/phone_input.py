@@ -2,9 +2,9 @@ import re
 from PySide6.QtWidgets import (
     QWidget, QHBoxLayout, QVBoxLayout, QPushButton, 
     QLineEdit, QDialog, QListWidget, QListWidgetItem, 
-    QLabel, QFrame
+    QLabel, QFrame, QApplication
 )
-from PySide6.QtCore import Qt, Signal, QPoint
+from PySide6.QtCore import Qt, Signal, QPoint, QRect
 
 COUNTRIES = [
     {"name": "India", "code": "+91", "iso": "IN"},
@@ -137,8 +137,26 @@ class CountryPickerPopover(QDialog):
         anchor = target_widget.parentWidget() if target_widget.parentWidget() else target_widget
         width = max(300, anchor.width())
         self.setFixedWidth(width)
-        pos = anchor.mapToGlobal(QPoint(0, anchor.height() + 4))
-        self.move(pos)
+
+        tl = anchor.mapToGlobal(QPoint(0, 0))
+
+        screen = QApplication.screenAt(tl) or QApplication.primaryScreen()
+        if screen is not None:
+            geo = screen.availableGeometry()
+        else:
+            geo = QRect(0, 0, 1920, 1080)
+
+        # Stay inside the screen: keep the popover fully visible
+        x = min(max(tl.x(), geo.left() + 6), geo.right() - self.width() - 6)
+
+        below_y = tl.y() + anchor.height() + 4
+        if below_y + self.height() <= geo.bottom():
+            y = below_y
+        else:
+            above_y = tl.y() - self.height() - 4
+            y = above_y if above_y >= geo.top() else max(geo.top(), geo.bottom() - self.height() - 6)
+
+        self.move(x, y)
         self.show()
         self.search_input.setFocus()
 

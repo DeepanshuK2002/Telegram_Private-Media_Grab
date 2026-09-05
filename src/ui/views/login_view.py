@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (
     QLineEdit, QPushButton, QStackedWidget, QFrame, QSizePolicy, QComboBox
 )
 from PySide6.QtCore import Qt, Signal, QUrl
-from PySide6.QtGui import QIcon, QPixmap, QDesktopServices
+from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QFontMetrics, QShowEvent
 import os
 from ui.components.phone_input import ShadcnPhoneInput
 
@@ -114,6 +114,7 @@ class LoginView(QWidget):
         self.lbl_header_subtitle.setObjectName("VercelSubtitle")
         self.lbl_header_subtitle.setAlignment(Qt.AlignCenter)
         self.lbl_header_subtitle.setWordWrap(True)
+        self._fit_header_subtitle()
 
         header_box.addWidget(self.lbl_title)
         header_box.addWidget(self.lbl_header_subtitle)
@@ -278,6 +279,24 @@ class LoginView(QWidget):
 
         card_layout.addWidget(self.stack)
         outer.addWidget(self.card, 0, Qt.AlignCenter)
+
+    def _fit_header_subtitle(self):
+        """QLabel heightForWidth can ignore wrapped text height when QSS
+        padding is applied, which clips descenders. Force enough height."""
+        lbl = self.lbl_header_subtitle
+        width = lbl.width()
+        if width <= 0:  # not laid out yet — use the card content width
+            width = self.card.width() - 64 if self.card.width() > 0 else 336
+        fm = lbl.fontMetrics()
+        text_rect = fm.boundingRect(0, 0, width, 2000, Qt.TextWordWrap, lbl.text())
+        # +8px for the QSS padding (4px top + 4px bottom) + a little breathing room
+        needed = text_rect.height() + 14
+        if lbl.minimumHeight() < needed:
+            lbl.setMinimumHeight(needed)
+
+    def showEvent(self, event: QShowEvent):
+        super().showEvent(event)
+        self._fit_header_subtitle()
 
     # ── helpers & event handlers ──────────────────────────────────────────
 
