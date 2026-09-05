@@ -28,6 +28,8 @@ class DownloadCard(QWidget):
         self.is_expanded   = False
         self.is_paused     = is_paused
         self.last_speed_val= 0 # KB/s
+        self._completed_ids = set()
+        self._bar_frac = (completed / total_items) if total_items > 0 else 0.0
         
         self.setup_ui(media_type)
         self.populate_files()
@@ -251,6 +253,8 @@ class DownloadCard(QWidget):
         self.total_items   = total_items
         self.completed     = completed
         self.files_metadata= files_metadata or []
+        self._completed_ids = {m.get("id") for m in self.files_metadata if m.get("completed")}
+        self._bar_frac = (completed / total_items) if total_items > 0 else 0.0
         self.lbl_title.setText(title)
         self.batch_progress_bar.setMaximum(max(total_items, 1))
         self.batch_progress_bar.setValue(completed)
@@ -285,13 +289,49 @@ class DownloadCard(QWidget):
         self.file_rows.clear()
         self.populate_files()
 
+    def _task_total_bytes(self):
+        return sum(m.get("size") or 0 for m in (self.files_metadata or []))
+
+    def _overall_frac(self, active_msg_id=None, active_bytes=0):
+        total = self._task_total_bytes()
+        if total > 0:
+            done = sum(m.get("size") or 0 for m in self.files_metadata if m.get("id") in self._completed_ids)
+            cur = 0.0
+            if active_msg_id is not None and active_msg_id not in self._completed_ids:
+                cap = next((m.get("size") or 0 for m in self.files_metadata if m.get("id") == active_msg_id), 0)
+                cur = min(active_bytes, cap) if cap > 0 else active_bytes
+            return min(max((done + cur) / total, 0.0), 1.0)
+        # Fallback: count-based when file sizes are unknown
+        if self.total_items > 0:
+            return min((self.completed + (0 if active_msg_id is None else 1)) / self.total_items, 1.0)
+        return 0.0
+
+    def _set_overall_frac(self, frac):
+        frac = min(max(frac, 0.0), 1.0)
+        if frac > self._bar_frac:
+            self._bar_frac = frac
+        self.batch_progress_bar.setMaximum(100)
+        self.batch_progress_bar.setValue(int(round(self._bar_frac * 100)))
+        self.batch_progress_bar.setFormat(f"{self._bar_frac * 100:5.1f}%")
+        return self._bar_frac
+
+    @staticmethod
+    def _fmt_eta(sec):
+        sec = int(sec)
+        if sec <= 0:
+            return ""
+        if sec >= 3600:
+            return f"~{sec // 3600}h {(sec % 3600) // 60}m left"
+        if sec >= 60:
+            return f"~{sec // 60}m {sec % 60}s left"
+        return f"~{sec}s left"
+
     def update_progress(self, current, total):
         if total != self.total_items:
             self.total_items = total
-            self.batch_progress_bar.setMaximum(max(total, 1))
-        self.batch_progress_bar.setValue(current)
-        self.batch_progress_bar.setFormat("%p%")
         self.completed = current
+        frac = (current / total) if total > 0 else 0.0
+        self._set_overall_frac(frac)
         self.lbl_status.setText(f"Downloaded {current} out of {total} items")
         
         # Only mark as completed if total > 0 (it may be 0 while still loading metadata)
@@ -353,31 +393,37 @@ class DownloadCard(QWidget):
             self.lbl_status_text.style().unpolish(self.lbl_status_text)
             self.lbl_status_text.style().polish(self.lbl_status_text)
 
-        # 🔥 Drive the BIG progress bar with the live byte progress of the
-        #    currently downloading video so it moves in real time.
-        frac = 0.0
-        if total_bytes and total_bytes > 0:
-            frac = min(max(current_bytes / float(total_bytes), 0.0), 1.0)
+        # Overall task progress across ALL files (never decreases between files),
+        # then enforce a high-water mark so the bar only ever moves up.
+        frac = self._overall_frac(msg_id, current_bytes)
+        shown = self._set_overall_frac(frac)
 
-        self.batch_progress_bar.setMaximum(100)
-        self.batch_progress_bar.setValue(int(round(frac * 100)))
-        self.batch_progress_bar.setFormat(f"{frac * 100:5.1f}%")
+        # Byte-level status line with ETA (no emoji)
+        total_all = self._task_total_bytes()
+        done = sum(m.get("size") or 0 for m in (self.files_metadata or []) if m.get("id") in self._completed_ids)
+        cur = 0.0
+        if msg_id not in self._completed_ids:
+            cap = next((m.get("size") or 0 for m in (self.files_metadata or []) if m.get("id") == msg_id), 0)
+            cur = min(current_bytes, cap) if cap > 0 else current_bytes
+        cur_total = done + cur
 
-        # Real-time byte-level status line
-        if total_bytes and total_bytes > 0:
-            cur_mb = current_bytes / (1024.0 * 1024.0)
-            tot_mb = total_bytes / (1024.0 * 1024.0)
-            status = f"⬇ {cur_mb:.1f} / {tot_mb:.1f} MB • {frac * 100:.1f}%"
-            if self.total_items > 1:
-                status += f" • {min(self.completed + 1, self.total_items)} of {self.total_items} items"
-            self.lbl_status.setText(status)
-        else:
-            self.lbl_status.setText(f"Downloading… • {self.completed} of {self.total_items} items")
+        status = f"{cur_total / (1024.0 * 1024.0):.1f} / {total_all / (1024.0 * 1024.0):.1f} MB • {shown * 100:.1f}%"
+        if self.total_items > 1:
+            active = 0 if msg_id in self._completed_ids else 1
+            status += f" • {min(self.completed + active, self.total_items)} of {self.total_items} items"
+        if self.last_speed_val > 0 and total_all > 0:
+            remaining = max(total_all - cur_total, 0)
+            eta_s = remaining / (self.last_speed_val * 1024) if self.last_speed_val > 0 else 0
+            eta_txt = self._fmt_eta(eta_s)
+            if eta_txt:
+                status += f" • {eta_txt}"
+        self.lbl_status.setText(status)
 
         if msg_id in self.file_rows:
             self.file_rows[msg_id].set_progress(current_bytes, total_bytes)
 
     def mark_file_completed(self, msg_id):
+        self._completed_ids.add(msg_id)
         if msg_id in self.file_rows:
             self.file_rows[msg_id].set_completed()
 

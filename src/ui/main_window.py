@@ -204,7 +204,7 @@ class MainWindow(QMainWindow):
         </ul>
         <hr/>
         <p style='font-size: 10px; color: #888;'>
-            <a href='https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab'>GitHub Repository</a> &nbsp;|&nbsp; &copy; 2026 TG Private Grab. Licensed under MIT.
+            <b>GitHub:</b> <a href='https://github.com/DeepanshuK2002/Telegram_Private-Media_Grab'>DeepanshuK2002/Telegram_Private-Media_Grab</a> &nbsp;|&nbsp; &copy; 2026 TG Private Grab. Licensed under MIT.
         </p>
         """
         msg.setText(text)
