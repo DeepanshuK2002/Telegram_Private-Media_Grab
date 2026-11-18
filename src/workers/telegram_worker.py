@@ -1,5 +1,6 @@
 import asyncio
 import os
+import time
 import threading
 from PySide6.QtCore import QThread, Signal, QObject
 
@@ -44,6 +45,55 @@ class WorkerSignals(QObject):
     avatar_ready = Signal(str, str) # channel_id, file_path
     thumbnail_ready = Signal(str, int, str) # channel_id, msg_id, file_path
 
+    # TeleScrap Signals
+    scrape_log = Signal(str)        # one status/log line per event
+    scrape_finished = Signal()      # all entities processed
+
+    # Auto Transfer Signals
+    auto_transfer_log = Signal(str)  # one status/log line per event
+    auto_transfer_status = Signal(str)  # current activity text ("" = idle)
+    auto_transfer_download_progress = Signal(str, int, int)  # filename, current_bytes, total_bytes
+    auto_transfer_upload_progress = Signal(str, str, int, int)  # filename, dest_title, current_bytes, total_bytes
+    auto_transfer_finished = Signal()
+
+    # Auto Message Signals
+    auto_message_log = Signal(str)   # one status/log line per event
+    auto_message_finished = Signal()
+
+    # Backup / Clone Signals
+    backup_log = Signal(str)         # one status/log line per event
+    backup_finished = Signal()
+
+    # Multi-account Signals
+    account_event = Signal(str)  # code_sent:<id>:<phone> | success:<id> | password_needed:<id>
+                                 # error:<id>:<msg> | status:<id>:<0|1> | switched:<id>
+
+
+def build_proxy_dict():
+    """Return a Telethon proxy dict from the saved proxy config, or None if disabled/invalid."""
+    try:
+        from ui.views.settings_view import load_config
+        cfg = load_config()
+        proxy = cfg.get("proxy") or {}
+        if not proxy.get("enabled"):
+            return None
+        ptype = str(proxy.get("type") or "SOCKS5").lower()
+        mapping = {"socks5": "socks5", "socks4": "socks4", "http": "http"}
+        proxy_type = mapping.get(ptype, "socks5")
+        host = str(proxy.get("host") or "").strip()
+        port = str(proxy.get("port") or "").strip()
+        if not host or not port:
+            return None
+        d = {"proxy_type": proxy_type, "addr": host, "port": int(port), "rdns": True}
+        user = str(proxy.get("user") or "").strip()
+        pwd = str(proxy.get("pass") or "")
+        if user:
+            d["username"] = user
+            d["password"] = pwd
+        return d
+    except Exception:
+        return None
+
 
 class TelegramWorker(QThread):
     def __init__(self, session_name, api_id, api_hash, parent=None):
@@ -54,6 +104,8 @@ class TelegramWorker(QThread):
         self.signals = WorkerSignals()
         self.loop = None
         self.client = None
+        self.clients = {}            # account_id -> TelegramClient (all accounts kept connected)
+        self._pending_login = {}      # account_id -> phone (login flow in progress)
         self.task_cancel_events = {}
         self.running_tasks = {} # task_id -> future or task
 
@@ -64,29 +116,48 @@ class TelegramWorker(QThread):
         """Thread entry point. Starts the asyncio event loop."""
         self.loop = asyncio.new_event_loop()
         asyncio.set_event_loop(self.loop)
-        
+
         try:
-            session_full_path = os.path.join(get_project_root(), self.session_name)
-            self.client = TelegramClient(session_full_path, self.api_id, self.api_hash, loop=self.loop)
+            from accounts import get_active_account_id, get_account_credentials, account_session_path, get_accounts
+            active = get_active_account_id()
+            api_id, api_hash = get_account_credentials(active)
+            session_full_path = account_session_path(active)
+            if not api_id or not api_hash:
+                # No usable credentials — fall back to legacy constructor args
+                api_id, api_hash = self.api_id, self.api_hash
+                session_full_path = os.path.join(get_project_root(), self.session_name)
+            client = TelegramClient(session_full_path, api_id, api_hash, loop=self.loop,
+                                    proxy=build_proxy_dict())
+            self.client = client
+            self.clients[active] = client
             self.loop.run_until_complete(self.check_auth())
-        except ValueError:
-            # API ID / Hash missing or invalid
+            # Populate phone/identity + login status for every account now that
+            # the event loop is running (set_worker's earlier call was a no-op
+            # because self.loop was still None).
+            try:
+                self.loop.run_until_complete(self._check_all_accounts_coro())
+            except Exception as e:
+                print(f"check_all_accounts startup error: {e}")
+        except Exception as e:
+            print(f"Worker startup error: {e}")
             self.signals.auth_needed.emit()
-        
+
         # Run forever processing asyncio tasks
         self.loop.run_forever()
 
     def set_credentials(self, api_id, api_hash):
         self.api_id = int(api_id)
         self.api_hash = api_hash
-        
+
         async def _reinit():
+            from accounts import get_active_account_id, account_session_path
             if self.client:
                 await self.client.disconnect()
-            session_full_path = os.path.join(get_project_root(), self.session_name)
-            self.client = TelegramClient(session_full_path, self.api_id, self.api_hash, loop=self.loop)
+            session_full_path = account_session_path(get_active_account_id())
+            self.client = TelegramClient(session_full_path, self.api_id, self.api_hash, loop=self.loop,
+                                         proxy=build_proxy_dict())
             await self.check_auth()
-            
+
         if self.loop:
             asyncio.run_coroutine_threadsafe(_reinit(), self.loop)
 
@@ -135,6 +206,12 @@ class TelegramWorker(QThread):
             else:
                 print("DEBUG: check_auth: authorized, emitting auth_success")
                 self.signals.auth_success.emit()
+                # Capture the logged-in phone/identity so Settings can show it
+                try:
+                    from accounts import get_active_account_id
+                    await self._store_account_identity(self.client, get_active_account_id())
+                except Exception:
+                    pass
         except Exception as e:
             print(f"DEBUG: check_auth error: {e}")
             self.signals.auth_error.emit(str(e))
@@ -258,10 +335,11 @@ class TelegramWorker(QThread):
                     "date": d.date.strftime("%b %d") if getattr(d, 'date', None) else "",
                 })
             
-            # Cache in SQLite for instant reload next time
+            from accounts import get_active_account_id
+            active_acc = get_active_account_id()
             from database import cache_channels_list
             try:
-                cache_channels_list(result)
+                cache_channels_list(result, account_id=active_acc)
             except Exception as ce:
                 print(f"DEBUG: cache_channels_list error: {ce}")
 
@@ -336,14 +414,25 @@ class TelegramWorker(QThread):
             pass
 
     def fetch_channel_videos(self, channel_id, limit=300):
-        """Fetches video messages for a specific channel/chat."""
+        """Fetches video messages for a specific channel/chat (backward-compat wrapper)."""
+        self.fetch_channel_media(channel_id, media_type="videos", limit=limit)
+
+    def fetch_channel_media(self, channel_id, media_type="videos", limit=300):
+        """Fetches media messages for a specific channel/chat by type.
+
+        media_type: "all", "videos", "images", "documents", "audio", "text"
+        """
         if not self.loop or not self.client:
             return
-        asyncio.run_coroutine_threadsafe(self._fetch_channel_videos_coro(channel_id, limit), self.loop)
+        asyncio.run_coroutine_threadsafe(self._fetch_channel_media_coro(channel_id, media_type, limit), self.loop)
 
-    async def _fetch_channel_videos_coro(self, channel_id, limit=300):
+    async def _fetch_channel_media_coro(self, channel_id, media_type="videos", limit=300):
         try:
-            self.signals.explore_loading.emit(True, "Fetching videos...")
+            type_label = {
+                "all": "media", "videos": "videos", "images": "images",
+                "documents": "documents", "audio": "audio", "text": "text"
+            }.get(media_type, "videos")
+            self.signals.explore_loading.emit(True, f"Fetching {type_label}...")
             clean_id, topic_id = parse_channel_input(channel_id)
             channel = await fetch_channel(self.client, clean_id)
 
@@ -362,62 +451,62 @@ class TelegramWorker(QThread):
                     self.signals.avatar_ready.emit(str(channel_id), avatar_path)
             except Exception:
                 pass
-            
-            from telethon.tl.types import InputMessagesFilterVideo, InputMessagesFilterDocument
-            
+
+            from core_downloader import get_messages_by_type
+
+            # Map media_type to media_choice used by get_messages_by_type
+            media_choice_map = {
+                "all": 6,
+                "videos": 2,
+                "images": 1,
+                "documents": 3,
+                "audio": 5,
+                "text": None,
+            }
+            media_choice = media_choice_map.get(media_type, 2)
+
             kwargs = {}
             if topic_id is not None:
                 kwargs['reply_to'] = topic_id
-                
-            # 🚀 Fire both message requests in parallel — halves channel load time
-            native_vids_coro = self.client.get_messages(channel, limit=limit, filter=InputMessagesFilterVideo(), **kwargs)
-            doc_msgs_coro = self.client.get_messages(channel, limit=min(limit, 100), filter=InputMessagesFilterDocument(), **kwargs)
-            native_vids, doc_msgs = await asyncio.gather(native_vids_coro, doc_msgs_coro)
-            doc_vids = [
-                m for m in doc_msgs 
-                if m.document and (
-                    (getattr(m.document, 'mime_type', '') or '').startswith('video/') or 
-                    any(attr for attr in getattr(m.document, 'attributes', []) if hasattr(attr, 'duration'))
-                )
-            ]
-            
-            # Combine and deduplicate by message id
-            all_msgs_map = {}
-            for m in list(native_vids) + doc_vids:
-                if m and m.id and m.id not in all_msgs_map:
-                    all_msgs_map[m.id] = m
-                    
-            sorted_msgs = sorted(all_msgs_map.values(), key=lambda m: m.id, reverse=True)
-            
-            videos_list = []
+
+            if media_type == "text":
+                messages = await self.client.get_messages(channel, limit=limit, **kwargs)
+                messages = [m for m in messages if getattr(m, 'media', None) is None and (m.message or "").strip()]
+            else:
+                messages = await get_messages_by_type(self.client, channel, media_choice, limit=limit, topic_id=topic_id)
+
+            sorted_msgs = sorted(messages, key=lambda m: m.id, reverse=True)
+
             ch_title = getattr(channel, 'title', getattr(channel, 'first_name', str(channel_id)))
-            
+            media_list = []
+
             for m in sorted_msgs:
                 fname = ""
-                if m.file and m.file.name:
+                if getattr(m, 'file', None) and m.file.name:
                     fname = m.file.name
-                elif m.file and m.file.ext:
-                    fname = f"video_{m.id}{m.file.ext}"
+                elif getattr(m, 'file', None) and m.file.ext:
+                    ext = m.file.ext or ""
+                    fname = f"{media_type}_{m.id}{ext}" if media_type != "text" else f"text_{m.id}.txt"
                 else:
-                    fname = f"video_{m.id}.mp4"
-                
+                    fname = f"{media_type}_{m.id}.dat" if media_type != "text" else f"text_{m.id}.txt"
+
                 fsize = 0
-                if m.file and m.file.size:
+                if getattr(m, 'file', None) and m.file.size:
                     fsize = m.file.size
-                elif m.document and m.document.size:
+                elif getattr(m, 'document', None) and m.document.size:
                     fsize = m.document.size
-                    
+
                 duration_sec = 0
                 width = 0
                 height = 0
-                if m.document and hasattr(m.document, 'attributes'):
+                if getattr(m, 'document', None) and hasattr(m.document, 'attributes'):
                     for attr in m.document.attributes:
                         if hasattr(attr, 'duration'):
                             duration_sec = attr.duration
                         if hasattr(attr, 'w') and hasattr(attr, 'h'):
                             width = attr.w
                             height = attr.h
-                            
+
                 if duration_sec:
                     mins, secs = divmod(int(duration_sec), 60)
                     hours, mins = divmod(mins, 60)
@@ -427,12 +516,18 @@ class TelegramWorker(QThread):
                         dur_str = f"{mins}:{secs:02d}"
                 else:
                     dur_str = ""
-                    
+
                 date_val = getattr(m, 'date', None)
                 date_str = date_val.strftime("%b %d, %Y") if date_val else ""
                 caption = (m.message or "").strip()
-                
-                videos_list.append({
+
+                mime_type = ""
+                if getattr(m, 'document', None):
+                    mime_type = getattr(m.document, 'mime_type', '') or ''
+                elif getattr(m, 'photo', None):
+                    mime_type = "image/photo"
+
+                media_list.append({
                     "id": m.id,
                     "channel_id": str(channel_id),
                     "channel_title": ch_title,
@@ -445,18 +540,19 @@ class TelegramWorker(QThread):
                     "resolution": f"{width}x{height}" if width and height else "",
                     "date_str": date_str,
                     "msg_obj": m,
+                    "media_type": media_type,
+                    "mime_type": mime_type,
                 })
-                
-            self.signals.channel_videos_fetched.emit(str(channel_id), videos_list)
+
+            self.signals.channel_videos_fetched.emit(str(channel_id), media_list)
             self.signals.explore_loading.emit(False, "")
 
-            # Schedule background thumbnail download for these videos on the worker loop
-            real_msgs = [v.get("msg_obj") for v in videos_list if v.get("msg_obj")]
+            real_msgs = [item.get("msg_obj") for item in media_list if item.get("msg_obj")]
             if real_msgs:
                 asyncio.create_task(self._fetch_channel_thumbnails_coro(clean_id, real_msgs))
         except Exception as e:
-            print(f"DEBUG: fetch_channel_videos error: {e}")
-            self.signals.explore_error.emit(f"Error fetching videos: {str(e)}")
+            print(f"DEBUG: fetch_channel_media error: {e}")
+            self.signals.explore_error.emit(f"Error fetching {media_type}: {str(e)}")
             self.signals.explore_loading.emit(False, "")
 
     def fetch_channel_thumbnails(self, channel_id, messages):
@@ -1072,9 +1168,867 @@ class TelegramWorker(QThread):
                 max_speed_kb=max_speed_kb if max_speed_kb > 0 else None,
                 msg_folder_resolver=msg_folder_resolver
             )
-            
+
             if task_id in self.running_tasks:
                 del self.running_tasks[task_id]
 
         except Exception as e:
             self.signals.error_occurred.emit(channel_input, str(e))
+
+    # -------------------------------------------------------------------------
+    # TeleScrap — member scraper (integrates ephell/Telescrape logic)
+    # -------------------------------------------------------------------------
+    def scrape_members(self, channel_ids, options):
+        """Scrape member lists from the given channels/groups and export CSVs."""
+        if not self.loop or not self.client:
+            self.signals.scrape_log.emit("Telegram client not ready.")
+            self.signals.scrape_finished.emit()
+            return
+        asyncio.run_coroutine_threadsafe(self._scrape_members_coro(channel_ids, options), self.loop)
+
+    async def _scrape_members_coro(self, channel_ids, options):
+        from telescrape import scrape_members as _scrape_members, extract_users_data, write_csv, scrape_output_dir
+        out_dir = scrape_output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        total = len(channel_ids)
+        self.signals.scrape_log.emit(f"Starting scrape of {total} group(s)/channel(s)...")
+        for idx, ch_id in enumerate(channel_ids, 1):
+            title = str(ch_id)
+            try:
+                clean_id, topic_id = parse_channel_input(str(ch_id))
+                channel = await fetch_channel(self.client, clean_id)
+                title = getattr(channel, 'title', clean_id) or str(ch_id)
+                self.signals.scrape_log.emit(f"[{idx}/{total}] Scraping members of {title}...")
+                users = await _scrape_members(self.client, channel, options)
+                if users is None:
+                    self.signals.scrape_log.emit(f"✗ {title}: admin privileges required to list members.")
+                    continue
+                data = extract_users_data(users)
+                csv_path = write_csv(data, title, out_dir)
+                self.signals.scrape_log.emit(f"✓ {title}: {len(users)} members → {os.path.basename(csv_path)}")
+            except Exception as e:
+                self.signals.scrape_log.emit(f"✗ {title}: {e}")
+        self.signals.scrape_log.emit(f"Done. CSVs saved to: {out_dir}")
+        self.signals.scrape_finished.emit()
+
+    # -------------------------------------------------------------------------
+    # Auto Message — re-send saved messages (text + emoji + optional image)
+    # to selected groups on a fixed interval
+    # -------------------------------------------------------------------------
+    def send_auto_message(self):
+        """Trigger one Auto Message cycle (from the interval timer or the UI)."""
+        if not self.loop or not self.client:
+            self.signals.auto_message_log.emit("Telegram client not ready.")
+            self.signals.auto_message_finished.emit()
+            return
+        asyncio.run_coroutine_threadsafe(self._auto_message_coro(), self.loop)
+
+    async def _auto_message_coro(self):
+        import os as _os
+        import random as _random
+        from auto_message import get_auto_message, save_auto_message, now_str
+
+        state = get_auto_message()
+        if not state["enabled"]:
+            return
+        dests = state["destination_ids"]
+        msgs = state["messages"]
+        if not dests or not msgs:
+            self.signals.auto_message_log.emit("Auto Message: no destinations or messages configured; skipping.")
+            self.signals.auto_message_finished.emit()
+            return
+
+        # Pick which message goes out: round-robin or random
+        idx = int(state.get("next_index") or 0)
+        if state.get("rotation") == "random":
+            idx = _random.randrange(len(msgs))
+        else:
+            idx = idx % len(msgs)
+        msg = msgs[idx]
+        text = (msg.get("text") or "").strip()
+        img = msg.get("image_path") or ""
+        have_img = bool(img) and _os.path.exists(img)
+        if not text and not have_img:
+            self.signals.auto_message_log.emit(f"Auto Message: message #{idx + 1} is empty; skipping.")
+            self.signals.auto_message_finished.emit()
+            return
+
+        # Resolve destination entities
+        dest_entities = []
+        for d in dests:
+            try:
+                clean_id, _ = parse_channel_input(str(d))
+                dest_entities.append(await fetch_channel(self.client, clean_id))
+            except Exception as de:
+                self.signals.auto_message_log.emit(f"Auto Message: cannot resolve {d}: {de}")
+        if not dest_entities:
+            self.signals.auto_message_log.emit("Auto Message: no reachable destination groups; skipping.")
+            self.signals.auto_message_finished.emit()
+            return
+
+        sent = 0
+        for dent in dest_entities:
+            try:
+                if have_img:
+                    await self.client.send_file(dent, img, caption=text or None)
+                else:
+                    await self.client.send_message(dent, text)
+                sent += 1
+                self.signals.auto_message_log.emit(f"✓ Sent message #{idx + 1} to {getattr(dent, 'title', 'dest')}")
+            except Exception as e:
+                self.signals.auto_message_log.emit(f"✗ send to {getattr(dent, 'title', 'dest')}: {e}")
+
+        # Advance rotation & stats
+        if state.get("rotation") == "random":
+            new_index = idx
+        else:
+            new_index = (idx + 1) % len(msgs)
+        save_auto_message(
+            last_run=now_str(),
+            send_count=int(state.get("send_count") or 0) + 1,
+            next_index=new_index,
+        )
+        self.signals.auto_message_log.emit(f"Auto Message: cycle done — sent to {sent}/{len(dest_entities)} group(s).")
+        self.signals.auto_message_finished.emit()
+
+    # -------------------------------------------------------------------------
+    # Auto Reply Bot — auto-reply to incoming private messages
+    # -------------------------------------------------------------------------
+    def check_auto_reply(self):
+        """Called every minute; sends the configured auto-reply to new private chats."""
+        if not self.loop or not self.client:
+            return
+        asyncio.run_coroutine_threadsafe(self._auto_reply_coro(), self.loop)
+
+    async def _auto_reply_coro(self):
+        from datetime import datetime
+        from auto_message import get_auto_message, save_auto_message
+        state = get_auto_message()
+        if not state.get("auto_reply_enabled"):
+            return
+        text = (state.get("auto_reply_text") or "").strip()
+        if not text:
+            return
+        cooldown_hours = int(state.get("auto_reply_cooldown_hours") or 24)
+        cooldown_sec = max(3600, cooldown_hours * 3600)
+        last = dict(state.get("auto_reply_last_replied") or {})
+        now = datetime.now().timestamp()
+
+        try:
+            dialogs = await self.client.get_dialogs(limit=40)
+        except Exception as e:
+            print(f"Auto reply dialogs error: {e}")
+            return
+
+        for d in dialogs:
+            try:
+                entity = getattr(d, 'entity', None)
+                if (not getattr(d, 'is_user', False)) or entity is None:
+                    continue
+                uid = getattr(entity, 'id', None)
+                if uid is None:
+                    continue
+                # Ignore Your Own Saved Messages and bots
+                if getattr(entity, 'is_self', False):
+                    continue
+                if getattr(entity, 'bot', False):
+                    continue
+                if (d.unread_count or 0) <= 0:
+                    continue
+                last_ts = float(last.get(str(uid), 0) or 0)
+                if now - last_ts < cooldown_sec:
+                    continue
+                await self.client.send_message(entity, text)
+                first = (getattr(entity, 'first_name', '') or '').strip()
+                name = first or str(uid)
+                last[str(uid)] = now
+                self.signals.auto_message_log.emit(f"✓ Auto-replied to {name}")
+            except Exception as e:
+                print(f"Auto reply send error: {e}")
+
+        save_auto_message(auto_reply_last_replied=last)
+
+    def scrape_messages(self, channel_ids, limit=1000):
+        """Export message history of the selected channels/groups to CSVs."""
+        if not self.loop or not self.client:
+            self.signals.scrape_log.emit("Telegram client not ready.")
+            self.signals.scrape_finished.emit()
+            return
+        asyncio.run_coroutine_threadsafe(self._scrape_messages_coro(channel_ids, limit), self.loop)
+
+    async def _scrape_messages_coro(self, channel_ids, limit):
+        from telescrape import scrape_messages, write_messages_csv, scrape_output_dir
+        out_dir = scrape_output_dir()
+        os.makedirs(out_dir, exist_ok=True)
+        total = len(channel_ids)
+        self.signals.scrape_log.emit(f"Exporting up to {limit if limit else 'ALL'} messages from {total} target(s)...")
+        for idx, ch_id in enumerate(channel_ids, 1):
+            title = str(ch_id)
+            try:
+                clean_id, topic_id = parse_channel_input(str(ch_id))
+                channel = await fetch_channel(self.client, clean_id)
+                title = getattr(channel, 'title', clean_id) or str(ch_id)
+                rows = await scrape_messages(self.client, channel, limit=limit, topic_id=topic_id)
+                csv_path = write_messages_csv(rows, f"{title}_messages", out_dir)
+                self.signals.scrape_log.emit(f"✓ {title}: {len(rows)} messages → {os.path.basename(csv_path)}")
+            except Exception as e:
+                self.signals.scrape_log.emit(f"✗ {title}: {e}")
+        self.signals.scrape_log.emit(f"Done. Message CSVs saved to: {out_dir}")
+        self.signals.scrape_finished.emit()
+
+    def scrape_channels_csv(self):
+        """Export the cached channel/group list to a CSV."""
+        if not self.loop:
+            self.signals.scrape_log.emit("Telegram client not ready.")
+            self.signals.scrape_finished.emit()
+            return
+        asyncio.run_coroutine_threadsafe(self._scrape_channels_coro(), self.loop)
+
+    async def _scrape_channels_coro(self):
+        try:
+            from database import get_cached_channels_list
+            from telescrape import export_channels_csv, scrape_output_dir
+            channels = get_cached_channels_list() or []
+            path = export_channels_csv(channels, scrape_output_dir())
+            self.signals.scrape_log.emit(f"✓ Exported {len(channels)} channels/groups → {os.path.basename(path)}")
+        except Exception as e:
+            self.signals.scrape_log.emit(f"✗ Channel list export failed: {e}")
+        self.signals.scrape_finished.emit()
+
+    # -------------------------------------------------------------------------
+    # Auto Transfer — watch a source channel and re-upload new media to groups
+    # -------------------------------------------------------------------------
+    def run_auto_transfer_check(self):
+        """Trigger an Auto Transfer check (from the 30-minute timer or the UI)."""
+        if not self.loop or not self.client:
+            return
+        asyncio.run_coroutine_threadsafe(self._auto_transfer_check_coro(), self.loop)
+
+    async def _auto_transfer_check_coro(self):
+        import re as _re
+        from auto_transfer import (
+            get_rules, update_rule, cache_dir, clean_cache,
+            MEDIA_CHOICES, now_str,
+        )
+        from utils.file_utils import sanitize_filename
+        from pdf_utils import remove_pdf_watermark
+
+        from accounts import get_active_account_id
+        active_id = get_active_account_id()
+
+        rules = [r for r in get_rules() if r.get("enabled")]
+        if not rules:
+            self.signals.auto_transfer_status.emit("")
+            self.signals.auto_transfer_finished.emit()
+            return
+
+        # Drop stale cache files (e.g. after a crash) before doing work
+        try:
+            clean_cache()
+        except Exception:
+            pass
+
+        self.signals.auto_transfer_status.emit(f"Running {len(rules)} rule(s)…")
+        for rule in rules:
+            await self._run_auto_transfer_rule(rule, active_id)
+        self.signals.auto_transfer_status.emit("")
+        self.signals.auto_transfer_finished.emit()
+
+    def run_auto_transfer_single(self, rule_id):
+        """Trigger a single Auto Transfer rule run (manual, from the UI)."""
+        if not self.loop or not self.client:
+            return
+        asyncio.run_coroutine_threadsafe(self._auto_transfer_single_coro(str(rule_id)), self.loop)
+
+    async def _auto_transfer_single_coro(self, rule_id):
+        from auto_transfer import get_rules, clean_cache
+        from accounts import get_active_account_id
+        active_id = get_active_account_id()
+        rules = [r for r in get_rules() if str(r.get("id")) == str(rule_id)]
+        if not rules:
+            self.signals.auto_transfer_log.emit(f"Auto Transfer: rule '{rule_id}' not found.")
+            self.signals.auto_transfer_finished.emit()
+            return
+        rule = rules[0]
+        label = rule.get("name") or rule_id
+        self.signals.auto_transfer_log.emit(f"[{label}] manual run started.")
+        self.signals.auto_transfer_status.emit(f"{label}: running…")
+        try:
+            clean_cache()
+        except Exception:
+            pass
+        await self._run_auto_transfer_rule(rule, active_id)
+        self.signals.auto_transfer_status.emit("")
+        self.signals.auto_transfer_finished.emit()
+
+    async def _run_auto_transfer_rule(self, rule, active_id):
+        """Run a single Auto Transfer rule (source → destinations)."""
+        from auto_transfer import (
+            update_rule, cache_dir,
+            MEDIA_CHOICES, now_str,
+        )
+        from utils.file_utils import sanitize_filename
+        from pdf_utils import remove_pdf_watermark
+
+        # Cross-account: download from one account, upload via another (if configured)
+        dl_account = rule.get("download_account_id") or active_id
+        ul_account = rule.get("upload_account_id") or dl_account
+        rule_label = rule.get("name") or rule.get("source_channel_id") or "Rule"
+
+        src_client, src_ok = await self._ensure_client_authorized(dl_account)
+        if not src_ok:
+            self.signals.auto_transfer_log.emit(
+                f"[{rule_label}] download account '{dl_account}' is not logged in / reachable; skipping."
+            )
+            return
+
+        if ul_account == dl_account:
+            dst_client = src_client
+        else:
+            dst_client, dst_ok = await self._ensure_client_authorized(ul_account)
+            if not dst_ok:
+                self.signals.auto_transfer_log.emit(
+                    f"[{rule_label}] upload account '{ul_account}' is not logged in / reachable; skipping."
+                )
+                return
+
+        src_client_label = f"download: {dl_account}" + (f"  ·  upload: {ul_account}" if ul_account != dl_account else "")
+        self.signals.auto_transfer_log.emit(f"[{rule_label}] starting ({src_client_label})")
+        self.signals.auto_transfer_status.emit(f"{rule_label}: resolving source channel…")
+
+        state = rule
+
+        src = state.get("source_channel_id", "")
+        dests = state.get("destination_ids", [])
+        if not src or not dests:
+            self.signals.auto_transfer_log.emit(f"[{rule_label}] no source channel or destination groups configured; skipping.")
+            return
+
+        media_type = state["media_type"]
+        now = now_str()
+
+        try:
+            src_clean, src_topic = parse_channel_input(str(src))
+            source = await fetch_channel(src_client, src_clean)
+        except Exception as e:
+            self.signals.auto_transfer_log.emit(f"[{rule_label}] cannot resolve source channel: {e}")
+            update_rule(state["id"], last_run=now)
+            return
+
+        src_title = getattr(source, "title", str(src))
+
+        # Resolve destination entities via the UPLOAD client (skip unreachable ones)
+        dest_entities = []
+        for d in dests:
+            try:
+                d_clean, _ = parse_channel_input(str(d))
+                dest_entities.append(await fetch_channel(dst_client, d_clean))
+            except Exception as de:
+                self.signals.auto_transfer_log.emit(f"[{rule_label}] cannot resolve destination {d}: {de}")
+        if not dest_entities:
+            self.signals.auto_transfer_log.emit(f"[{rule_label}] no reachable destination groups; skipping.")
+            return
+
+        self.signals.auto_transfer_status.emit(f"{rule_label}: transferring to {len(dest_entities)} destination(s)…")
+
+        # Text/Chat mode: re-post message texts, no file download/upload
+        if media_type == "text":
+            try:
+                messages = await src_client.get_messages(source, reply_to=src_topic, limit=20)
+                messages = [m for m in messages if (m.message or "").strip() and not getattr(m, "media", None)]
+                last_seen = int(state["last_seen_msg_id"])
+                if last_seen == 0 and not state["include_existing"]:
+                    newest = max((m.id for m in messages), default=0)
+                    update_rule(state["id"], last_seen_msg_id=newest, last_run=now)
+                    self.signals.auto_transfer_log.emit(
+                        f"Auto Transfer: initialized for {src_title} — watching for NEW text posts."
+                    )
+                    return
+                new_msgs = sorted(
+                    [m for m in messages if m.id > last_seen] if not state["include_existing"] else messages,
+                    key=lambda m: m.id,
+                )
+                if not new_msgs:
+                    update_rule(state["id"], last_run=now)
+                    self.signals.auto_transfer_log.emit(f"Auto Transfer: {src_title} — no new text posts.")
+                    return
+                max_seen = last_seen
+                for m in new_msgs:
+                    caption = (m.message or "").strip()
+                    for dent in dest_entities:
+                        try:
+                            await dst_client.send_message(dent, caption)
+                        except Exception as de:
+                            self.signals.auto_transfer_log.emit(f"✗ text → {getattr(dent, 'title', 'dest')}: {de}")
+                    max_seen = max(max_seen, m.id)
+                    self.signals.auto_transfer_log.emit(f"✓ text post #{m.id} sent to {len(dest_entities)} group(s)")
+                update_rule(state["id"], last_seen_msg_id=max_seen, last_run=now)
+            except Exception as e:
+                self.signals.auto_transfer_log.emit(f"Auto Transfer (text) error: {e}")
+            self.signals.auto_transfer_finished.emit()
+            return
+
+        # Media mode: download to the isolated cache, re-upload, then delete
+        try:
+            messages = await get_messages_by_type(
+                src_client, source, MEDIA_CHOICES.get(media_type, 6),
+                limit=20, topic_id=src_topic,
+            )
+        except Exception as e:
+            self.signals.auto_transfer_log.emit(f"Auto Transfer: failed to fetch media from {src_title}: {e}")
+            self.signals.auto_transfer_finished.emit()
+            return
+
+        last_seen = int(state["last_seen_msg_id"])
+
+        # First-ever run: do NOT dump the whole backlog — seed last_seen and wait for new posts
+        if last_seen == 0 and not state["include_existing"]:
+            newest = max((m.id for m in messages), default=0)
+            update_rule(state["id"], last_seen_msg_id=newest, last_run=now)
+            self.signals.auto_transfer_log.emit(
+                f"Auto Transfer: initialized for {src_title} — watching for NEW posts "
+                f"(backlog untouched, last_seen={newest})."
+            )
+            self.signals.auto_transfer_finished.emit()
+            return
+
+        if state["include_existing"]:
+            new_msgs = sorted(messages, key=lambda m: m.id)
+        else:
+            new_msgs = sorted([m for m in messages if m.id > last_seen], key=lambda m: m.id)
+
+        if not new_msgs:
+            update_rule(state["id"], last_run=now)
+            self.signals.auto_transfer_log.emit(f"Auto Transfer: {src_title} — no new media.")
+            self.signals.auto_transfer_finished.emit()
+            return
+
+        out_dir = cache_dir()
+        max_seen = last_seen
+        for m in new_msgs:
+            sent_all = True
+            fname = ""
+            if getattr(m, "file", None) and m.file.name:
+                fname = sanitize_filename(m.file.name)
+            else:
+                ext = getattr(getattr(m, "file", None), "ext", "") or ""
+                fname = f"{media_type}_{m.id}{ext}"
+
+            dest_path = os.path.join(out_dir, fname)
+            # Avoid overwriting a partially downloaded duplicate in cache
+            base, ext = os.path.splitext(fname)
+            counter = 1
+            while os.path.exists(dest_path):
+                counter += 1
+                dest_path = os.path.join(out_dir, f"{base} ({counter}){ext}")
+
+            try:
+                total_size = 0
+                try:
+                    total_size = int(getattr(getattr(m, "file", None), "size", 0) or 0)
+                except Exception:
+                    total_size = 0
+
+                # Prefer the parallel (multi-connection) downloader for max throughput;
+                # fall back to Telethon's single-connection download_media if it can't
+                # handle this media or the file is small.
+                used_fast = False
+                if total_size > 0:
+                    try:
+                        from utils.fast_telethon import fast_download_file
+                        last_dl = {"t": 0.0}
+                        def dl_progress(current, total):
+                            t = time.time()
+                            tot = total or total_size
+                            if tot and (t - last_dl["t"] >= 0.1 or current == tot or current == 0):
+                                last_dl["t"] = t
+                                self.signals.auto_transfer_download_progress.emit(fname, int(current), int(tot))
+                        ok = await fast_download_file(
+                            src_client, m, dest_path, total_size,
+                            progress_callback=dl_progress, workers=8,
+                        )
+                        if ok and os.path.exists(dest_path):
+                            used_fast = True
+                    except Exception as fe:
+                        self.signals.auto_transfer_log.emit(f"  (fast download fallback: {fe})")
+                if not used_fast:
+                    last_dl = {"t": 0.0}
+                    def dl_progress2(current, total):
+                        t = time.time()
+                        tot = total or total_size
+                        if tot and (t - last_dl["t"] >= 0.1 or current == tot or current == 0):
+                            last_dl["t"] = t
+                            self.signals.auto_transfer_download_progress.emit(fname, int(current), int(tot))
+                    download_result = await m.download_media(file=dest_path, progress_callback=dl_progress2)
+                    if not download_result or not os.path.exists(dest_path):
+                        download_result = dest_path
+                    dest_path = str(download_result)
+                else:
+                    download_result = dest_path
+                    dest_path = str(dest_path)
+            except Exception as e:
+                self.signals.auto_transfer_download_progress.emit(fname, 0, 0)
+                self.signals.auto_transfer_log.emit(f"✗ download {fname}: {e}")
+                max_seen = max(max_seen, m.id)
+                continue
+
+            # PDFs: strip text/stamp watermarks before re-uploading
+            watermark_removed = False
+            if dest_path.lower().endswith(".pdf"):
+                cleaned_path = remove_pdf_watermark(dest_path, dest_path)
+                watermark_removed = bool(cleaned_path and os.path.exists(cleaned_path))
+                dest_path = cleaned_path or dest_path
+
+            ul_total = 0
+            try:
+                ul_total = os.path.getsize(dest_path)
+            except Exception:
+                ul_total = 0
+            async def _upload_one(dent):
+                try:
+                    caption = (m.message or "").strip() or None
+                    last_ul = {"t": 0.0}
+                    def ul_progress(current, total):
+                        t = time.time()
+                        tot = total or ul_total
+                        if tot and (t - last_ul["t"] >= 0.1 or current == tot or current == 0):
+                            last_ul["t"] = t
+                            self.signals.auto_transfer_upload_progress.emit(fname, getattr(dent, "title", "dest"), int(current), int(tot))
+                    await dst_client.send_file(dent, dest_path, caption=caption, progress_callback=ul_progress)
+                    return True, None
+                except Exception as de:
+                    self.signals.auto_transfer_upload_progress.emit(fname, getattr(dent, "title", "dest"), 0, 0)
+                    return False, de
+
+            results = await asyncio.gather(*[_upload_one(d) for d in dest_entities], return_exceptions=True)
+            for dent, res in zip(dest_entities, results):
+                if isinstance(res, Exception):
+                    sent_all = False
+                    self.signals.auto_transfer_log.emit(f"✗ send {fname} → {getattr(dent, 'title', 'dest')}: {res}")
+                elif isinstance(res, tuple):
+                    ok, err = res
+                    if not ok:
+                        sent_all = False
+                        self.signals.auto_transfer_log.emit(f"✗ send {fname} → {getattr(dent, 'title', 'dest')}: {err}")
+
+            if sent_all:
+                try:
+                    os.remove(dest_path)
+                except OSError:
+                    pass
+                wm_note = "  ·  watermark removed" if watermark_removed else ""
+                self.signals.auto_transfer_log.emit(
+                    f"✓ {fname}{wm_note} → {len(dest_entities)} group(s); removed from cache"
+                )
+            else:
+                # Keep the file in the cache for inspection; skip retrying to avoid re-sending
+                self.signals.auto_transfer_log.emit(f"✗ {fname}: kept in cache (not all destinations received it)")
+
+            max_seen = max(max_seen, m.id)
+
+        update_rule(state["id"], last_seen_msg_id=max_seen, last_run=now)
+
+    # -------------------------------------------------------------------------
+    # Multi-account support
+    # -------------------------------------------------------------------------
+    async def _get_or_create_client(self, account_id):
+        account_id = str(account_id)
+        if account_id in self.clients:
+            return self.clients[account_id]
+        from accounts import get_account_credentials, account_session_path
+        api_id, api_hash = get_account_credentials(account_id)
+        if not api_id or not api_hash:
+            return None
+        session_full_path = account_session_path(account_id)
+        try:
+            client = TelegramClient(session_full_path, api_id, api_hash, loop=self.loop,
+                                    proxy=build_proxy_dict())
+            await client.connect()
+        except Exception:
+            return None
+        self.clients[account_id] = client
+        return client
+
+    async def _ensure_client_authorized(self, account_id):
+        account_id = str(account_id)
+        client = await self._get_or_create_client(account_id)
+        if client is None:
+            return None, False
+        try:
+            return client, await client.is_user_authorized()
+        except Exception:
+            return client, False
+
+    def switch_account(self, account_id):
+        if not self.loop:
+            return
+        asyncio.run_coroutine_threadsafe(self._switch_account_coro(str(account_id)), self.loop)
+
+    async def _switch_account_coro(self, account_id):
+        from accounts import set_active_account_id
+        client, authorized = await self._ensure_client_authorized(account_id)
+        if client is None:
+            self.signals.account_event.emit(f"error:{account_id}:failed to connect")
+            return
+        set_active_account_id(account_id)
+        self.client = client
+        self.signals.account_event.emit(f"switched:{account_id}")
+        if authorized:
+            try:
+                self.fetch_user_dialogs()
+            except Exception:
+                pass
+        else:
+            self.signals.auth_needed.emit()
+
+    def start_account_login(self, account_id, phone):
+        if not self.loop:
+            return
+        asyncio.run_coroutine_threadsafe(self._start_account_login_coro(str(account_id), str(phone)), self.loop)
+
+    async def _start_account_login_coro(self, account_id, phone):
+        client, authorized = await self._ensure_client_authorized(account_id)
+        if client is None:
+            self.signals.account_event.emit(f"error:{account_id}:failed to connect or missing API credentials")
+            return
+        # Persist the phone the user entered so Settings can show it immediately
+        try:
+            from accounts import update_account, _normalize_phone
+            update_account(account_id, phone=_normalize_phone(str(phone).strip()))
+        except Exception:
+            pass
+        if authorized:
+            await self._store_account_identity(client, account_id)
+            self.signals.account_event.emit(f"success:{account_id}")
+            return
+        try:
+            await client.send_code_request(phone)
+            self._pending_login[account_id] = phone
+            self.signals.account_event.emit(f"code_sent:{account_id}:{phone}")
+        except Exception as e:
+            self.signals.account_event.emit(f"error:{account_id}:{e}")
+
+    async def _store_account_identity(self, client, account_id):
+        """Fetch get_me() and persist phone/username/user_id for the account."""
+        try:
+            me = await client.get_me()
+            phone = getattr(me, "phone", None) or ""
+            if phone and not str(phone).startswith("+"):
+                phone = "+" + str(phone)
+            from accounts import update_account
+            update_account(
+                account_id,
+                phone=phone,
+                username=getattr(me, "username", None) or "",
+                user_id=getattr(me, "id", 0) or 0,
+                first_name=getattr(me, "first_name", None) or "",
+            )
+        except Exception:
+            pass
+
+    def submit_account_code(self, account_id, code):
+        if not self.loop:
+            return
+        asyncio.run_coroutine_threadsafe(self._submit_account_code_coro(str(account_id), str(code)), self.loop)
+
+    async def _submit_account_code_coro(self, account_id, code):
+        client = self.clients.get(account_id)
+        phone = self._pending_login.get(account_id)
+        if not client or not phone:
+            self.signals.account_event.emit(f"error:{account_id}:no pending login")
+            return
+        from telethon.errors import SessionPasswordNeededError
+        try:
+            await client.sign_in(phone, code)
+            await self._store_account_identity(client, account_id)
+            self.signals.account_event.emit(f"success:{account_id}")
+        except SessionPasswordNeededError:
+            self.signals.account_event.emit(f"password_needed:{account_id}")
+        except Exception as e:
+            self.signals.account_event.emit(f"error:{account_id}:{e}")
+
+    def submit_account_password(self, account_id, password):
+        if not self.loop:
+            return
+        asyncio.run_coroutine_threadsafe(self._submit_account_password_coro(str(account_id), str(password)), self.loop)
+
+    async def _submit_account_password_coro(self, account_id, password):
+        client = self.clients.get(account_id)
+        if not client:
+            self.signals.account_event.emit(f"error:{account_id}:no client")
+            return
+        try:
+            await client.sign_in(password=password)
+            await self._store_account_identity(client, account_id)
+            self.signals.account_event.emit(f"success:{account_id}")
+        except Exception as e:
+            self.signals.account_event.emit(f"error:{account_id}:{e}")
+
+    def check_all_accounts(self):
+        if not self.loop:
+            return
+        asyncio.run_coroutine_threadsafe(self._check_all_accounts_coro(), self.loop)
+
+    async def _check_all_accounts_coro(self):
+        from accounts import get_accounts
+        for acc in get_accounts():
+            acc_id = str(acc.get("id"))
+            client, authorized = await self._ensure_client_authorized(acc_id)
+            if authorized and client is not None:
+                await self._store_account_identity(client, acc_id)
+            self.signals.account_event.emit(f"status:{acc_id}:{'1' if authorized else '0'}")
+
+    # -------------------------------------------------------------------------
+    # Backup & Clone — dump a channel/group to a folder or re-publish it elsewhere
+    # -------------------------------------------------------------------------
+    def run_backup(self, source_id, dest_id, mode, include_media=True, include_text=True, limit=None):
+        """mode: 'backup' (download to folder) or 'clone' (re-publish to dest channel/group)."""
+        if not self.loop or not self.client:
+            self.signals.backup_log.emit("Telegram client not ready.")
+            self.signals.backup_finished.emit()
+            return
+        asyncio.run_coroutine_threadsafe(
+            self._backup_coro(str(source_id), str(dest_id or ""), str(mode),
+                              bool(include_media), bool(include_text), limit),
+            self.loop,
+        )
+
+    async def _backup_coro(self, source_id, dest_id, mode, include_media, include_text, limit):
+        import os as _os
+        from backup import backup_folder_for, write_backup_index, sanitize_name
+        from utils.file_utils import sanitize_filename
+
+        try:
+            src_clean, src_topic = parse_channel_input(str(source_id))
+            source = await fetch_channel(self.client, src_clean)
+        except Exception as e:
+            self.signals.backup_log.emit(f"Backup: cannot resolve source channel: {e}")
+            self.signals.backup_finished.emit()
+            return
+
+        src_title = getattr(source, 'title', str(source_id))
+        self.signals.backup_log.emit(f"Backup started: {src_title} (mode={mode})")
+
+        dest = None
+        if mode == "clone":
+            if not dest_id:
+                self.signals.backup_log.emit("Clone: no destination channel/group selected.")
+                self.signals.backup_finished.emit()
+                return
+            try:
+                d_clean, _ = parse_channel_input(str(dest_id))
+                dest = await fetch_channel(self.client, d_clean)
+            except Exception as e:
+                self.signals.backup_log.emit(f"Clone: cannot resolve destination: {e}")
+                self.signals.backup_finished.emit()
+                return
+
+        # Iterate ALL messages (media + text posts) in one pass, oldest first
+        backfill = []
+        try:
+            async for m in self.client.iter_messages(source, reply_to=src_topic, reverse=True):
+                backfill.append(m)
+                if limit and len(backfill) >= int(limit):
+                    break
+        except Exception as e:
+            self.signals.backup_log.emit(f"Backup: cannot read messages: {e}")
+            self.signals.backup_finished.emit()
+            return
+
+        self.signals.backup_log.emit(f"Exporting {len(backfill)} message(s)...")
+        out_dir = backup_folder_for(src_title) if mode == "backup" else None
+        if out_dir:
+            _os.makedirs(out_dir, exist_ok=True)
+            self.signals.backup_log.emit(f"Saving to: {out_dir}")
+
+        rows = []
+        media_count = 0
+        for i, m in enumerate(backfill, 1):
+            text = (m.message or "").strip()
+            has_media = bool(getattr(m, 'media', None))
+            media_type = "text"
+            if getattr(m, 'photo', None):
+                media_type = "image"
+            elif getattr(m, 'video', None) or getattr(m, 'video_note', None):
+                media_type = "video"
+            elif getattr(m, 'audio', None) or getattr(m, 'voice', None):
+                media_type = "audio"
+            elif getattr(m, 'document', None):
+                media_type = "document"
+
+            fname = ""
+            if getattr(m, 'file', None) and m.file.name:
+                fname = sanitize_filename(m.file.name)
+            elif has_media:
+                ext = getattr(getattr(m, 'file', None), 'ext', '') or ''
+                fname = f"{media_type}_{m.id}{ext}"
+            else:
+                fname = f"text_{m.id}.txt"
+
+            if mode == "backup":
+                row_path = None
+                if has_media and include_media:
+                    try:
+                        row_path = await m.download_media(file=_os.path.join(out_dir, fname))
+                        media_count += 1
+                    except Exception as e:
+                        self.signals.backup_log.emit(f"✗ media #{m.id}: {e}")
+                elif not has_media and include_text:
+                    try:
+                        with open(_os.path.join(out_dir, fname), "w", encoding="utf-8") as f:
+                            f.write(text)
+                    except Exception:
+                        pass
+                rows.append({
+                    "id": m.id,
+                    "date": m.date.strftime("%Y-%m-%d %H:%M:%S") if getattr(m, 'date', None) else "",
+                    "media_type": media_type,
+                    "file": fname if row_path else ("" if not has_media else fname),
+                    "media_saved": bool(row_path) if has_media else include_text,
+                    "text": text if include_text else "",
+                    "reply_to": getattr(getattr(m, 'reply_to', None), 'reply_to_msg_id', None) or "",
+                })
+            else:  # clone
+                try:
+                    if has_media and include_media:
+                        tmp_path = await m.download_media(file=cache_dir_for_clone())
+                        caption = text or None
+                        await self.client.send_file(dest, tmp_path, caption=caption)
+                        try:
+                            if tmp_path and _os.path.exists(tmp_path):
+                                _os.remove(tmp_path)
+                        except OSError:
+                            pass
+                        media_count += 1
+                    elif not has_media and include_text:
+                        await self.client.send_message(dest, text)
+                    rows.append({
+                        "id": m.id,
+                        "date": m.date.strftime("%Y-%m-%d %H:%M:%S") if getattr(m, 'date', None) else "",
+                        "media_type": media_type,
+                        "cloned": True,
+                        "text": text[:200],
+                    })
+                except Exception as e:
+                    self.signals.backup_log.emit(f"✗ post #{m.id}: {e}")
+
+            if i % 25 == 0:
+                self.signals.backup_log.emit(f"… {i}/{len(backfill)} processed ({media_count} media)")
+
+        if mode == "backup":
+            json_path = write_backup_index(rows, out_dir)
+            self.signals.backup_log.emit(f"✓ Backup complete: {len(rows)} message(s), {media_count} media file(s) → {out_dir}")
+            self.signals.backup_log.emit(f"Index: {_os.path.basename(json_path)}")
+        else:
+            self.signals.backup_log.emit(f"✓ Clone complete: {media_count} media + text re-published to {getattr(dest, 'title', 'dest')}")
+        self.signals.backup_finished.emit()
+
+
+def cache_dir_for_clone():
+    """Temp path for media while re-publishing (clone mode)."""
+    import os
+    from resource_utils import get_project_root
+    d = os.path.join(get_project_root(), "auto_transfer_cache")
+    os.makedirs(d, exist_ok=True)
+    import time
+    return os.path.join(d, f"clone_{int(time.time()*1000)}")

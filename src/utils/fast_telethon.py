@@ -115,7 +115,7 @@ async def _download_part(client, location, offset, limit, dc_id=None):
                 raise e
 
 
-async def fast_download_file(client, location, target_path, file_size, dc_id=None, progress_callback=None, cancel_event=None, workers=4):
+async def fast_download_file(client, location, target_path, file_size, dc_id=None, progress_callback=None, cancel_event=None, workers=8):
     """
     Downloads media at maximum throughput using parallel chunk streams with resumable state.
     Falls back gracefully if parallel streaming is not supported for the media.
@@ -152,18 +152,26 @@ async def fast_download_file(client, location, target_path, file_size, dc_id=Non
     completed_parts = set()
     if os.path.exists(temp_path):
         existing_part_size = os.path.getsize(temp_path)
-        if existing_part_size == file_size:
+        if existing_part_size == file_size and os.path.exists(meta_path):
+            # Only trust the .part if the .meta file validates it — a .part can
+            # linger with full size by sparse truncation but contain incomplete data.
             completed_parts = _load_meta(meta_path, file_size, total_parts)
-            # If all parts are completed, or if size matches and no meta exists (legacy complete .part)
-            if len(completed_parts) == total_parts or (not os.path.exists(meta_path) and not completed_parts):
+            if len(completed_parts) == total_parts:
                 await _atomic_finalize_async(temp_path, target_path, meta_path)
                 return True
+            if not completed_parts:
+                # Meta exists but is invalid/empty — restart fresh
+                completed_parts = set()
         else:
-            # File size mismatch, re-truncate
+            # .part size doesn't match, or .meta is missing — do NOT trust the file
             with open(temp_path, "wb") as f:
                 f.truncate(file_size)
             completed_parts = set()
-            _save_meta(meta_path, file_size, CHUNK_SIZE, total_parts, completed_parts)
+            try:
+                _save_meta(meta_path, file_size, CHUNK_SIZE, total_parts, completed_parts)
+            except Exception:
+                pass
+
     else:
         with open(temp_path, "wb") as f:
             f.truncate(file_size)

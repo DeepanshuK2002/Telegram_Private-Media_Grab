@@ -64,9 +64,16 @@ def init_db():
         is_channel INTEGER,
         is_group INTEGER,
         unread_count INTEGER,
-        date TEXT
+        date TEXT,
+        pinned INTEGER DEFAULT 0
     )
     """)
+    
+    # Backfill pinned column for existing databases that lack it
+    try:
+        cursor.execute("ALTER TABLE channels_cache ADD COLUMN pinned INTEGER DEFAULT 0")
+    except sqlite3.OperationalError:
+        pass
     
     conn.commit()
     conn.close()
@@ -261,6 +268,31 @@ def update_media_downloaded_path(channel_id, msg_id, downloaded_path):
     conn.commit()
     conn.close()
 
+def get_media_states(channel_id):
+    """
+    Returns {msg_id (int): 'completed' | 'partial' | 'none'} for one channel.
+    'partial' = download was started (downloaded_path recorded) but not finished.
+    """
+    c_id = str(channel_id).replace("-100", "", 1) if str(channel_id).startswith("-100") else str(channel_id)
+    conn = sqlite3.connect(DB_PATH)
+    cursor = conn.cursor()
+    cursor.execute("SELECT msg_id, completed, downloaded_path FROM media_cache WHERE channel_id=?", (c_id,))
+    states = {}
+    for msg_id, completed, downloaded_path in cursor.fetchall():
+        try:
+            mid = int(msg_id)
+        except Exception:
+            continue
+        if completed == 1:
+            states[mid] = "completed"
+        elif downloaded_path:
+            states[mid] = "partial"
+        else:
+            states[mid] = "none"
+    conn.close()
+    return states
+
+
 def get_completed_state_db():
     """Returns a set of (channel_id, msg_id) for fast lookup of finished files."""
     conn = sqlite3.connect(DB_PATH)
@@ -388,8 +420,12 @@ def migrate_json_to_db():
     conn.close()
 
 
-def cache_channels_list(channels_list):
-    """Caches list of dialogs/channels for instant loading in Explore."""
+def cache_channels_list(channels_list, account_id=None):
+    """Caches list of dialogs/channels for instant loading in Explore.
+
+    If account_id is given, it is recorded in the account_ids column so the UI can
+    show which account(s) a channel belongs to.
+    """
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
     cursor.execute("""
@@ -400,22 +436,35 @@ def cache_channels_list(channels_list):
         is_channel INTEGER,
         is_group INTEGER,
         unread_count INTEGER,
-        date TEXT
+        date TEXT,
+        pinned INTEGER DEFAULT 0,
+        account_ids TEXT DEFAULT ''
     )
     """)
+    for stmt in (
+        "ALTER TABLE channels_cache ADD COLUMN pinned INTEGER DEFAULT 0",
+        "ALTER TABLE channels_cache ADD COLUMN account_ids TEXT DEFAULT ''",
+    ):
+        try:
+            cursor.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
     for ch in channels_list:
+        cid = str(ch.get("id", ""))
         cursor.execute("""
-        INSERT INTO channels_cache (channel_id, title, username, is_channel, is_group, unread_count, date)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO channels_cache (channel_id, title, username, is_channel, is_group, unread_count, date, pinned, account_ids)
+        VALUES (?, ?, ?, ?, ?, ?, ?, 0, '')
         ON CONFLICT(channel_id) DO UPDATE SET
             title=excluded.title,
             username=excluded.username,
             is_channel=excluded.is_channel,
             is_group=excluded.is_group,
             unread_count=excluded.unread_count,
-            date=excluded.date
+            date=excluded.date,
+            pinned=channels_cache.pinned,
+            account_ids=channels_cache.account_ids
         """, (
-            str(ch.get("id", "")),
+            cid,
             ch.get("title", ""),
             ch.get("username", ""),
             1 if ch.get("is_channel") else 0,
@@ -423,12 +472,19 @@ def cache_channels_list(channels_list):
             ch.get("unread_count", 0),
             ch.get("date", "")
         ))
+        if account_id:
+            row = cursor.execute("SELECT account_ids FROM channels_cache WHERE channel_id=?", (cid,)).fetchone()
+            existing = (row[0] or "") if row else ""
+            ids = [x for x in existing.split(",") if x.strip()]
+            if str(account_id) not in ids:
+                ids.append(str(account_id))
+            cursor.execute("UPDATE channels_cache SET account_ids=? WHERE channel_id=?", (",".join(ids), cid))
     conn.commit()
     conn.close()
 
 
 def get_cached_channels_list():
-    """Retrieves cached channels list from SQLite."""
+    """Retrieves cached channels list from SQLite, with pinned channels first."""
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     cursor = conn.cursor()
@@ -440,17 +496,28 @@ def get_cached_channels_list():
         is_channel INTEGER,
         is_group INTEGER,
         unread_count INTEGER,
-        date TEXT
+        date TEXT,
+        pinned INTEGER DEFAULT 0,
+        account_ids TEXT DEFAULT ''
     )
     """)
-    cursor.execute("SELECT * FROM channels_cache ORDER BY title COLLATE NOCASE ASC")
+    for stmt in (
+        "ALTER TABLE channels_cache ADD COLUMN pinned INTEGER DEFAULT 0",
+        "ALTER TABLE channels_cache ADD COLUMN account_ids TEXT DEFAULT ''",
+    ):
+        try:
+            cursor.execute(stmt)
+        except sqlite3.OperationalError:
+            pass
+    cursor.execute("SELECT * FROM channels_cache ORDER BY pinned DESC, title COLLATE NOCASE ASC")
     rows = [dict(r) for r in cursor.fetchall()]
     conn.close()
     return rows
 
 
-def cache_channel(channel_id, title="", username=""):
-    """Upserts a single channel/chat into channels_cache."""
+def cache_channel(channel_id, title="", username="", account_id=None):
+    # Upserts a single channel/chat into channels_cache.
+    # If account_id is given, it is appended to the account_ids column (deduped).
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -462,20 +529,77 @@ def cache_channel(channel_id, title="", username=""):
             is_channel INTEGER,
             is_group INTEGER,
             unread_count INTEGER,
-            date TEXT
+            date TEXT,
+            pinned INTEGER DEFAULT 0,
+            account_ids TEXT DEFAULT ''
         )
         """)
+        for stmt in (
+            "ALTER TABLE channels_cache ADD COLUMN pinned INTEGER DEFAULT 0",
+            "ALTER TABLE channels_cache ADD COLUMN account_ids TEXT DEFAULT ''",
+        ):
+            try:
+                cursor.execute(stmt)
+            except sqlite3.OperationalError:
+                pass
+        cid = str(channel_id).replace("-100", "", 1)
         cursor.execute("""
-        INSERT INTO channels_cache (channel_id, title, username, is_channel, is_group)
-        VALUES (?, ?, ?, 1, 0)
+        INSERT INTO channels_cache (channel_id, title, username, is_channel, is_group, account_ids)
+        VALUES (?, ?, ?, 1, 0, '')
         ON CONFLICT(channel_id) DO UPDATE SET
             title=CASE WHEN excluded.title != '' THEN excluded.title ELSE channels_cache.title END,
-            username=CASE WHEN excluded.username != '' THEN excluded.username ELSE channels_cache.username END
-        """, (str(channel_id).replace("-100", "", 1), title, username))
+            username=CASE WHEN excluded.username != '' THEN excluded.username ELSE channels_cache.username END,
+            pinned=channels_cache.pinned,
+            account_ids=channels_cache.account_ids
+        """, (cid, title, username))
+        if account_id:
+            row = cursor.execute("SELECT account_ids FROM channels_cache WHERE channel_id=?", (cid,)).fetchone()
+            existing = (row[0] or "") if row else ""
+            ids = [x for x in existing.split(",") if x.strip()]
+            if str(account_id) not in ids:
+                ids.append(str(account_id))
+            cursor.execute("UPDATE channels_cache SET account_ids=? WHERE channel_id=?", (",".join(ids), cid))
         conn.commit()
         conn.close()
         return True
     except Exception as e:
-        print(f"cache_channel error: {e}")
+        print("cache_channel error: " + str(e))
         return False
+
+
+def set_channel_pinned(channel_id, pinned: bool):
+    """Set or unset the pinned flag for a channel. Returns True on success."""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        # DB stores channel_id WITH -100 prefix, so use as-is
+        c_id = str(channel_id)
+        cursor.execute("""
+        UPDATE channels_cache SET pinned=? WHERE channel_id=?
+        """, (1 if pinned else 0, c_id))
+        # Also try without -100 in case DB has mixed format
+        if cursor.rowcount == 0:
+            c_id_alt = str(channel_id).replace("-100", "", 1) if str(channel_id).startswith("-100") else str(channel_id)
+            cursor.execute("""
+            UPDATE channels_cache SET pinned=? WHERE channel_id=?
+            """, (1 if pinned else 0, c_id_alt))
+        conn.commit()
+        conn.close()
+        return True
+    except Exception as e:
+        print(f"set_channel_pinned error: {e}")
+        return False
+
+
+def get_pinned_channels():
+    """Returns a list of pinned channel dicts, ordered by title."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute("""
+    SELECT * FROM channels_cache WHERE pinned=1 ORDER BY title COLLATE NOCASE ASC
+    """)
+    rows = [dict(r) for r in cursor.fetchall()]
+    conn.close()
+    return rows
 

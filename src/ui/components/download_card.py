@@ -356,22 +356,13 @@ class DownloadCard(QWidget):
                 size /= 1024
             return f"{size:.1f} GB"
             
-        max_visible = 100
+        max_visible = len(self.files_metadata)  # show the complete list, no matter how big it is
         for idx, meta in enumerate(self.files_metadata[:max_visible]):
             row = FileRow(meta["id"], meta["name"], fmt(meta["size"]), idx)
             if meta.get("completed"):
                 row.set_completed()
             self.files_layout.addWidget(row)
             self.file_rows[meta["id"]] = row
-            
-        if len(self.files_metadata) > max_visible:
-            from PySide6.QtWidgets import QLabel
-            more_count = len(self.files_metadata) - max_visible
-            lbl_more = QLabel(f"◈ ... and {more_count} more files in queue ...")
-            lbl_more.setObjectName("MutedText")
-            lbl_more.setAlignment(Qt.AlignCenter)
-            lbl_more.setStyleSheet("padding: 8px; font-style: italic; color: #888;")
-            self.files_layout.addWidget(lbl_more)
 
     def update_file_progress(self, msg_id, current_bytes, total_bytes, speed_str):
         self.lbl_status_text.setText(speed_str)

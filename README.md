@@ -233,3 +233,15 @@ Distributed under the **MIT License**. See [LICENSE](LICENSE) for details.
 <p align="center">
   Developed & Maintained with ❤️ by <a href="https://github.com/DeepanshuK2002"><b>Deepanshu Kashyap</b></a>
 </p>
+
+
+
+## What's New in v0.1.0
+
+- Multi-account support - log in to several Telegram accounts, switch the active one, and let Auto Transfer download from one account and upload via another.
+- Auto Transfer - watch a source channel/group and re-publish new media to selected destinations on a 30-minute loop (or on demand). Files are staged in an isolated cache and deleted after every destination receives them. PDF watermarks are stripped before re-upload. Multiple independent source to destination rules, each with its own last-seen state, media-type filter, and account routing.
+- Auto Message - schedule text + emoji + optional image messages to groups on a fixed interval with round-robin/random rotation, plus an auto-reply bot for incoming private messages.
+- Backup / Clone - export a channel's media + messages to a dated local folder, or clone a channel message-by-message into another channel/group.
+- TeleScrap - scrape members (with a Premium-only filter), export messages to CSV, and export the channel list to CSV.
+- Speed - parallel multi-connection downloads (8 workers) and parallel uploads across destinations; speeds no longer drop below a few MB/s on fast links.
+- UI - tokenized light/dark theme, shadcn-style searchable comboboxes, pinned channels, channel-ID copy, per-account login status with phone numbers in Settings.

@@ -16,6 +16,7 @@ from database import (
 )
 from ui.views.settings_view import load_config
 from ui.components.clean_combobox import CleanComboBox, create_clean_menu
+from ui.components.searchable_combobox import SearchableComboBox
 
 
 def format_bytes(size_bytes):
@@ -91,6 +92,10 @@ class FileManagerView(QWidget):
         icon_path = get_resource_path(os.path.join("assets", "icons", f"refresh{suffix}"))
         if hasattr(self, 'btn_refresh') and os.path.exists(icon_path):
             self.btn_refresh.setIcon(QIcon(icon_path))
+        for combo_name in ("combo_channel", "combo_category", "combo_status"):
+            combo = getattr(self, combo_name, None)
+            if combo is not None and hasattr(combo, "refresh_theme"):
+                combo.refresh_theme()
         if hasattr(self, 'all_items') and self.all_items:
             self.apply_filter()
 
@@ -145,13 +150,13 @@ class FileManagerView(QWidget):
         f_layout.addWidget(self.input_search, stretch=3)
 
         # Channel Selector Dropdown
-        self.combo_channel = CleanComboBox()
+        self.combo_channel = SearchableComboBox()
         self.combo_channel.addItem("All Channels", "all")
         self.combo_channel.currentIndexChanged.connect(self.apply_filter)
         f_layout.addWidget(self.combo_channel, stretch=2)
 
         # Category Filter
-        self.combo_category = CleanComboBox()
+        self.combo_category = SearchableComboBox()
         self.combo_category.addItems([
             "All Categories", "Images", "Videos", "Documents / PDFs", "ZIPs", "Audio"
         ])
@@ -159,7 +164,7 @@ class FileManagerView(QWidget):
         f_layout.addWidget(self.combo_category, stretch=2)
 
         # Status Filter
-        self.combo_status = CleanComboBox()
+        self.combo_status = SearchableComboBox()
         self.combo_status.addItems([
             "All Status", "Present on Disk", "Missing / Deleted"
         ])

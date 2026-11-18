@@ -9,7 +9,8 @@ from PySide6.QtWidgets import (
     QToolTip
 )
 from PySide6.QtCore import Qt, QSize, QUrl, QTimer
-from PySide6.QtGui import QIcon, QPixmap, QCloseEvent, QAction, QCursor, QDesktopServices
+from PySide6.QtGui import QIcon, QPixmap, QCloseEvent, QAction, QCursor, QDesktopServices, QPainter, QColor, QPen, QPainterPath
+from PySide6.QtCore import QPointF
 from ui.components.download_card import DownloadCard
 from ui.components.media_browser import MediaBrowserDialog
 from ui.components.thumbnail_worker import ThumbnailWorker
@@ -18,6 +19,10 @@ from ui.views.settings_view import SettingsView
 from ui.views.downloads_view import DownloadsView
 from ui.views.file_manager_view import FileManagerView
 from ui.views.explore_view import ExploreView, get_avatar_color
+from ui.views.scrape_view import ScrapeView
+from ui.views.auto_transfer_view import AutoTransferView
+from ui.views.auto_message_view import AutoMessageView
+from ui.views.backup_view import BackupView
 from ui.views.login_view import LoginView
 from resource_utils import get_resource_path
 from utils.update_checker import UpdateChecker, UpdateDownloader
@@ -388,10 +393,16 @@ class MainWindow(QMainWindow):
         h_layout = QHBoxLayout(self.header)
         h_layout.setContentsMargins(40, 20, 24, 0)
         
-        lbl_header = QLabel("Add Download")
+        lbl_header = QLabel("Tools")
         lbl_header.setObjectName("MainHeader")
         h_layout.addWidget(lbl_header)
         h_layout.addStretch()
+
+        self.lbl_bg_status = QLabel("")
+        self.lbl_bg_status.setObjectName("MutedText")
+        self.lbl_bg_status.setVisible(False)
+        self.lbl_bg_status.setStyleSheet("font-size: 11px; color: #F59E0B;")
+        h_layout.addWidget(self.lbl_bg_status)
 
         content_layout.addWidget(self.header)
 
@@ -403,14 +414,46 @@ class MainWindow(QMainWindow):
         self.page_queue = DownloadsView()
         self.page_files = FileManagerView()
         self.page_settings = SettingsView()
+        self.page_settings.set_worker(self.worker)
         self.page_login = LoginView()
-        
+        self.page_scrape = ScrapeView()
+        self.page_scrape.set_worker(self.worker)
+        self.page_auto_transfer = AutoTransferView()
+        self.page_auto_transfer.set_worker(self.worker)
+        self.page_auto_message = AutoMessageView()
+        self.page_auto_message.set_worker(self.worker)
+        self.page_backup = BackupView()
+        self.page_backup.set_worker(self.worker)
+
+        # Auto Transfer — check on app start and every 30 minutes afterwards
+        self._auto_transfer_timer = QTimer(self)
+        self._auto_transfer_timer.setInterval(30 * 60 * 1000)
+        self._auto_transfer_timer.timeout.connect(self.worker.run_auto_transfer_check)
+        self._auto_transfer_timer.start()
+
+        # Auto Message — light-weight check every minute; whether it fires is
+        # decided by the configured interval and the last run timestamp
+        self._auto_message_timer = QTimer(self)
+        self._auto_message_timer.setInterval(60 * 1000)
+        self._auto_message_timer.timeout.connect(self._maybe_send_auto_message)
+        self._auto_message_timer.start()
+
+        # Auto Reply Bot — poll dialogs every minute for new private messages
+        self._auto_reply_timer = QTimer(self)
+        self._auto_reply_timer.setInterval(60 * 1000)
+        self._auto_reply_timer.timeout.connect(self.worker.check_auto_reply)
+        self._auto_reply_timer.start()
+
         self.stacked_widget.addWidget(self.page_home)     # Index 0
         self.stacked_widget.addWidget(self.page_explore)  # Index 1
         self.stacked_widget.addWidget(self.page_queue)    # Index 2
         self.stacked_widget.addWidget(self.page_files)    # Index 3
         self.stacked_widget.addWidget(self.page_settings) # Index 4
         self.stacked_widget.addWidget(self.page_login)    # Index 5
+        self.stacked_widget.addWidget(self.page_scrape)   # Index 6
+        self.stacked_widget.addWidget(self.page_auto_transfer) # Index 7
+        self.stacked_widget.addWidget(self.page_auto_message)  # Index 8
+        self.stacked_widget.addWidget(self.page_backup)        # Index 9
         
         # Connect Explore signals
         self.page_explore.set_worker(self.worker)
@@ -505,132 +548,68 @@ class MainWindow(QMainWindow):
     def setup_home_page(self):
         self.page_home = QWidget()
         layout = QVBoxLayout(self.page_home)
-        layout.setContentsMargins(40, 24, 40, 40)
-        layout.setSpacing(24)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
 
-        # ── Known Channels Card (Unified with Channel/Chat Search & Fetch) ──
-        self._channel_copy_buttons = []
-        self._all_cached_channels = []
+        # Keep input_channel as attribute (used elsewhere) but hidden on clean home page
+        self.input_channel = QLineEdit()
+        self.input_channel.setVisible(False)
 
-        channels_card = QFrame()
-        channels_card.setObjectName("WhiteCard")
-        ch_layout = QVBoxLayout(channels_card)
-        ch_layout.setContentsMargins(28, 24, 28, 24)
-        ch_layout.setSpacing(16)
+        # ── Home cards: shadcn CardImage style, compact single row ──
+        layout.addStretch(1)
+        from PySide6.QtWidgets import QHBoxLayout
+        cards_row = QHBoxLayout()
+        cards_row.setSpacing(14)
+        cards_row.setAlignment(Qt.AlignCenter | Qt.AlignVCenter)
 
-        # Header Row
-        ch_header = QHBoxLayout()
-        ch_header.setSpacing(8)
+        tele_card = self._make_feature_card(
+            title="TeleScrap",
+            description="Scrape member lists to CSV — right inside the app.",
+            badge="SCRAPER",
+            button_text="Open TeleScrap →",
+            button_obj="VercelButton",
+            on_click=lambda: self.switch_page("TeleScrap", 6),
+            icon_kind="telescrape",
+        )
+        cards_row.addWidget(tele_card)
 
-        self.lbl_channels_title = QLabel("Known Channels")
-        self.lbl_channels_title.setObjectName("SectionHeader")
-        ch_header.addWidget(self.lbl_channels_title)
+        auto_card = self._make_feature_card(
+            title="Auto Transfer",
+            description="Re-upload new media to your chosen groups.",
+            badge="AUTOMATION",
+            button_text="Open Auto Transfer →",
+            button_obj="VercelButton",
+            on_click=lambda: self.switch_page("AutoTransfer", 7),
+            icon_kind="transfer",
+        )
+        cards_row.addWidget(auto_card)
 
-        self.lbl_channels_count = QLabel("0")
-        self.lbl_channels_count.setObjectName("ChannelsCountBadge")
-        ch_header.addWidget(self.lbl_channels_count)
+        auto_msg_card = self._make_feature_card(
+            title="Auto Message",
+            description="Send saved messages on a fixed schedule.",
+            badge="SCHEDULING",
+            button_text="Open Auto Message →",
+            button_obj="VercelButton",
+            on_click=lambda: self.switch_page("AutoMessage", 8),
+            icon_kind="message",
+        )
+        cards_row.addWidget(auto_msg_card)
 
-        ch_header.addStretch()
+        backup_card = self._make_feature_card(
+            title="Backup / Clone",
+            description="Export or clone any channel locally.",
+            badge="ARCHIVE",
+            button_text="Open Backup →",
+            button_obj="VercelButton",
+            on_click=lambda: self.switch_page("Backup", 9),
+            icon_kind="backup",
+        )
+        cards_row.addWidget(backup_card)
 
-        # Real-time search/filter input with full channel/chat fetch capabilities
-        self.input_channel_filter = QLineEdit()
-        self.input_channel_filter.setObjectName("KnownChannelInput")
-        self.input_channel_filter.setPlaceholderText("Filter or ID...")
-        self.input_channel_filter.setMinimumWidth(100)
-        self.input_channel_filter.setMaximumWidth(125)
-        self.input_channel_filter.setFixedHeight(30)
-        self.input_channel_filter.textChanged.connect(self.filter_channels_list)
-        self.input_channel_filter.returnPressed.connect(self.on_fetch_clicked)
-        ch_header.addWidget(self.input_channel_filter)
+        layout.addLayout(cards_row)
+        layout.addStretch(1)
 
-        # Unified alias so any code referencing self.input_channel continues to work seamlessly
-        self.input_channel = self.input_channel_filter
-
-        # Fetch Media Button (preserves fetch media functionality)
-        self.btn_fetch = QPushButton("Fetch Media")
-        self.btn_fetch.setObjectName("KnownChannelFetchBtn")
-        self.btn_fetch.setFixedHeight(30)
-        self.btn_fetch.setCursor(Qt.PointingHandCursor)
-        self.btn_fetch.clicked.connect(self.on_fetch_clicked)
-        ch_header.addWidget(self.btn_fetch)
-
-        # Refresh button with theme-aware icon
-        self.btn_refresh_channels = QPushButton()
-        self.btn_refresh_channels.setObjectName("IconButtonSmall")
-        self.btn_refresh_channels.setFixedSize(30, 30)
-        self.btn_refresh_channels.setIconSize(QSize(14, 14))
-        self.btn_refresh_channels.setToolTip("Refresh channel list from Telegram")
-        self.btn_refresh_channels.setCursor(Qt.PointingHandCursor)
-        self.btn_refresh_channels.clicked.connect(self.on_refresh_channels_clicked)
-        ch_header.addWidget(self.btn_refresh_channels)
-
-        ch_layout.addLayout(ch_header)
-
-        # Subtitle & Hints
-        lbl_ch_desc = QLabel("Filter saved channels, or enter any public username, invite link, or numeric ID to fetch media.")
-        lbl_ch_desc.setObjectName("MutedText")
-        lbl_ch_desc.setWordWrap(True)
-        ch_layout.addWidget(lbl_ch_desc)
-
-        # Scroll Area for Channel Rows
-        self.channels_scroll = QScrollArea()
-        self.channels_scroll.setWidgetResizable(True)
-        self.channels_scroll.setFrameShape(QFrame.NoFrame)
-        self.channels_scroll.setMinimumHeight(280)
-        self.channels_scroll.setMaximumHeight(520)
-        self.channels_scroll.setStyleSheet("background: transparent;")
-
-        self.channels_container = QWidget()
-        self.channels_container.setStyleSheet("background: transparent;")
-        self.channels_layout = QVBoxLayout(self.channels_container)
-        self.channels_layout.setContentsMargins(0, 0, 4, 0)
-        self.channels_layout.setSpacing(8)
-        self.channels_layout.setAlignment(Qt.AlignTop)
-
-        self.channels_scroll.setWidget(self.channels_container)
-        ch_layout.addWidget(self.channels_scroll)
-
-        # No match feedback label for filtering
-        self.lbl_filter_no_match = QLabel()
-        self.lbl_filter_no_match.setObjectName("MutedText")
-        self.lbl_filter_no_match.setAlignment(Qt.AlignCenter)
-        self.lbl_filter_no_match.setStyleSheet("padding: 24px; font-size: 13px; color: #71717A;")
-        self.lbl_filter_no_match.hide()
-        ch_layout.addWidget(self.lbl_filter_no_match)
-
-        # Empty State
-        self.empty_channels_frame = QFrame()
-        self.empty_channels_frame.setObjectName("EmptyChannelsState")
-        empty_layout = QVBoxLayout(self.empty_channels_frame)
-        empty_layout.setContentsMargins(16, 20, 16, 20)
-        empty_layout.setSpacing(8)
-        empty_layout.setAlignment(Qt.AlignCenter)
-
-        lbl_empty_title = QLabel("No Saved Channels Yet")
-        lbl_empty_title.setStyleSheet("font-weight: 600; font-size: 13px;")
-        lbl_empty_title.setAlignment(Qt.AlignCenter)
-
-        lbl_empty_desc = QLabel("Enter a channel username or link in the search bar above, or browse in Explore to automatically save channels here.")
-        lbl_empty_desc.setObjectName("MutedText")
-        lbl_empty_desc.setAlignment(Qt.AlignCenter)
-        lbl_empty_desc.setWordWrap(True)
-
-        btn_go_explore = QPushButton("Browse Channels in Explore")
-        btn_go_explore.setObjectName("SecondaryButton")
-        btn_go_explore.setCursor(Qt.PointingHandCursor)
-        btn_go_explore.setFixedWidth(210)
-        btn_go_explore.clicked.connect(lambda: self.switch_page("Explore", 1))
-
-        empty_layout.addWidget(lbl_empty_title)
-        empty_layout.addWidget(lbl_empty_desc)
-        empty_layout.addWidget(btn_go_explore, 0, Qt.AlignCenter)
-        ch_layout.addWidget(self.empty_channels_frame)
-
-        layout.addWidget(channels_card)
-        layout.addStretch()
-        
-        self.card_widgets = {} # task_id -> DownloadCard
-        self.update_home_icons(self._is_dark_mode())
+        self.card_widgets = {}  # task_id -> DownloadCard
         self.refresh_channels_list()
 
     def _is_dark_mode(self) -> bool:
@@ -646,8 +625,135 @@ class MainWindow(QMainWindow):
         except Exception:
             return False
 
+    def _paint_card_banner(self, kind: str, is_dark: bool) -> QPixmap:
+        """Paint the 16:9 banner: single-hue blue vertical gradient with a
+        large Lucide icon centered on top (shadcn CardImage style)."""
+        from PySide6.QtGui import QPainterPath, QLinearGradient, QImageReader
+        W, H = 200, 112
+        pix = QPixmap(W, H)
+        pix.fill(Qt.transparent)
+
+        painter = QPainter(pix)
+        painter.setRenderHint(QPainter.Antialiasing, True)
+
+        clip = QPainterPath()
+        clip.addRoundedRect(0, 0, W, H, 8, 8)
+        painter.setClipPath(clip)
+
+        # Single-hue vertical gradient (blue shades, deep at the bottom)
+        gradient = QLinearGradient(0, 0, 0, H)
+        gradient.setColorAt(0.0, QColor("#14264A"))
+        gradient.setColorAt(0.55, QColor("#0E1A33"))
+        gradient.setColorAt(1.0, QColor("#09090B"))
+        painter.fillRect(0, 0, W, H, gradient)
+
+        # Faint dot grid for texture
+        dot = QColor(255, 255, 255, 14)
+        for gx in range(11, W, 18):
+            for gy in range(11, H, 18):
+                painter.fillRect(gx, gy, 2, 2, dot)
+
+        # Large Lucide icon centered on the gradient
+        icons = {
+            "telescrape": ('<path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/>'
+                           '<circle cx="9" cy="7" r="4"/>'
+                           '<path d="M22 21v-2a4 4 0 0 0-3-3.87"/>'
+                           '<path d="M16 3.13a4 4 0 0 1 0 7.75"/>'),
+            "transfer": ('<polyline points="17 1 21 5 17 9"/>'
+                         '<path d="M3 11V9a4 4 0 0 1 4-4h14"/>'
+                         '<polyline points="7 23 3 19 7 15"/>'
+                         '<path d="M21 13v2a4 4 0 0 1-4 4H3"/>'),
+            "message": ('<rect x="2" y="4" width="20" height="16" rx="2"/>'
+                        '<path d="m22 7-10 6L2 7"/>'),
+            "backup": ('<rect x="9" y="9" width="13" height="13" rx="2"/>'
+                       '<path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>'),
+        }
+        body = icons.get(kind, icons["telescrape"])
+        icon_size = 46
+        svg = (
+            '<svg xmlns="http://www.w3.org/2000/svg" width="{s}" height="{s}" viewBox="0 0 24 24" '
+            'fill="none" stroke="#FFFFFF" stroke-width="1.35" stroke-linecap="round" '
+            'stroke-linejoin="round">{body}</svg>'
+        ).format(s=icon_size, body=body)
+        icon_pix = QPixmap()
+        icon_pix.loadFromData(svg.encode("utf-8"), "SVG")
+        painter.setOpacity(0.92)
+        painter.drawPixmap((W - icon_size) // 2, (H - icon_size) // 2 - 2, icon_pix)
+        painter.setOpacity(1.0)
+
+        painter.end()
+        return pix
+
+    def _make_feature_card(self, title: str, description: str, badge: str,
+                           button_text: str, button_obj: str, on_click,
+                           icon_kind: str) -> QFrame:
+        """Build a shadcn CardImage-style card: banner image with overlay,
+        badge, title, 2-line description, full-width footer button."""
+        is_dark = self._is_dark_mode()
+        card = QFrame()
+        card.setObjectName("WhiteCard")
+        card.setFixedWidth(200)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(0)
+        layout.setAlignment(Qt.AlignTop)
+
+        # Banner image with dark overlay (16:9-ish)
+        banner = QLabel()
+        banner.setFixedSize(200, 112)
+        banner.setPixmap(self._paint_card_banner(icon_kind, is_dark))
+        layout.addWidget(banner)
+
+        # Content area
+        content = QWidget()
+        content_layout = QVBoxLayout(content)
+        content_layout.setContentsMargins(8, 8, 8, 8)
+        content_layout.setSpacing(4)
+
+        # Header row: centered title + small badge (image-manager style caption)
+        header_row = QHBoxLayout()
+        header_row.setSpacing(6)
+        header_row.addStretch()
+        lbl_title = QLabel(title)
+        lbl_title.setStyleSheet("font-size: 13px; font-weight: 700;")
+        header_row.addWidget(lbl_title)
+
+        lbl_badge = QLabel(badge)
+        if is_dark:
+            lbl_badge.setStyleSheet("background-color: rgba(59,130,246,0.14); color: #93C5FD; "
+                                    "border: 1px solid rgba(96,165,250,0.4); border-radius: 8px; "
+                                    "padding: 1px 7px; font-size: 8px; font-weight: 700; letter-spacing: 0.06em;")
+        else:
+            lbl_badge.setStyleSheet("background-color: rgba(59,130,246,0.10); color: #1D4ED8; "
+                                    "border: 1px solid rgba(59,130,246,0.35); border-radius: 8px; "
+                                    "padding: 1px 7px; font-size: 8px; font-weight: 700; letter-spacing: 0.06em;")
+        header_row.addWidget(lbl_badge)
+        header_row.addStretch()
+        content_layout.addLayout(header_row)
+
+        # Description — exactly two lines, muted, centered
+        lbl_desc = QLabel(description)
+        lbl_desc.setWordWrap(True)
+        lbl_desc.setFixedHeight(28)
+        lbl_desc.setAlignment(Qt.AlignCenter)
+        lbl_desc.setStyleSheet("font-size: 10px; color: #A1A1AA;")
+        content_layout.addWidget(lbl_desc)
+
+        # Footer: full-width button
+        btn = QPushButton(button_text)
+        btn.setObjectName(button_obj)
+        btn.setFixedHeight(32)
+        btn.setStyleSheet("font-size: 11px;")
+        btn.setCursor(Qt.PointingHandCursor)
+        btn.clicked.connect(on_click)
+        content_layout.addWidget(btn)
+
+        layout.addWidget(content)
+        return card
+
     def update_home_icons(self, is_dark: bool):
-        """Updates icons on the Home page according to the active theme."""
+        """Restores theme-appropriate icons on the Home page."""
         if hasattr(self, 'btn_refresh_channels') and self.btn_refresh_channels:
             refresh_file = "refresh_white.png" if is_dark else "refresh_black.png"
             p = get_resource_path(os.path.join("assets", "icons", refresh_file))
@@ -675,28 +781,9 @@ class MainWindow(QMainWindow):
         self.lbl_status_msg.setText("Refreshing channels...")
 
     def filter_channels_list(self, query: str):
-        """Filters the displayed channels list in real-time."""
-        query = query.strip().lower()
-        visible_count = 0
-        for i in range(self.channels_layout.count()):
-            item = self.channels_layout.itemAt(i)
-            w = item.widget() if item else None
-            if w and hasattr(w, "channel_data"):
-                data = w.channel_data
-                title = str(data.get("title") or "").lower()
-                username = str(data.get("username") or "").lower()
-                cid = str(data.get("channel_id") or "").lower()
-                matches = (not query) or (query in title) or (query in username) or (query in cid)
-                w.setVisible(matches)
-                if matches:
-                    visible_count += 1
-
-        total = len(getattr(self, '_all_cached_channels', []))
-        if hasattr(self, 'lbl_channels_count'):
-            if query:
-                self.lbl_channels_count.setText(f"{visible_count}/{total}")
-            else:
-                self.lbl_channels_count.setText(str(total))
+        """Filters the displayed channels list in real-time (no-op on clean home page)."""
+        # Channel list display now lives in ExploreView; home page is clean.
+        pass
 
     def on_avatar_ready(self, cid: str, path: str):
         """Efficiently updates a single channel row's avatar without rebuilding the entire list."""
@@ -712,53 +799,19 @@ class MainWindow(QMainWindow):
                 row.avatar_label.setStyleSheet("background: transparent; border-radius: 18px;")
 
     def refresh_channels_list(self):
-        """Rebuilds the Known Channels list from the DB cache with UI updates paused."""
+        """Cache channels from DB (home page is now clean; display lives in Explore)."""
         from database import get_cached_channels_list
         try:
             channels = get_cached_channels_list()
         except Exception:
             channels = []
-
         self._all_cached_channels = channels
         self._channel_copy_buttons = []
         self._channel_row_widgets = {}
 
-        if hasattr(self, 'channels_scroll') and self.channels_scroll:
-            self.channels_scroll.setUpdatesEnabled(False)
-
-        try:
-            # Clear existing rows
-            while self.channels_layout.count():
-                item = self.channels_layout.takeAt(0)
-                w = item.widget()
-                if w:
-                    w.deleteLater()
-
-            count = len(channels)
-            self.lbl_channels_count.setText(str(count))
-
-            if not channels:
-                self.empty_channels_frame.show()
-                self.channels_scroll.hide()
-                self.input_channel_filter.show()
-                return
-
-            self.empty_channels_frame.hide()
-            self.channels_scroll.show()
-            self.input_channel_filter.show()
-
-            for ch in channels:
-                row = self._build_channel_row(ch)
-                self.channels_layout.addWidget(row)
-
-            self.channels_layout.addStretch()
-
-            # Re-apply active filter if text exists
-            if self.input_channel_filter.text():
-                self.filter_channels_list(self.input_channel_filter.text())
-        finally:
-            if hasattr(self, 'channels_scroll') and self.channels_scroll:
-                self.channels_scroll.setUpdatesEnabled(True)
+    def _build_channel_row(self, ch):
+        """Kept for compatibility; channel rows are now built in ExploreView."""
+        return None
 
     def _build_channel_row(self, ch):
         """Builds a modern row widget: avatar + title/badge + sublabel + ID badge + copy icon + fetch button."""
@@ -917,6 +970,32 @@ class MainWindow(QMainWindow):
             self.header.hide()
             self.stacked_widget.setCurrentIndex(4)
             self.btn_settings.setChecked(True)
+        elif "TeleScrap" in item_text:
+            self.header.hide()
+            self.stacked_widget.setCurrentIndex(6)
+            for b in (self.btn_home, self.btn_explore, self.btn_queue, self.btn_files, self.btn_settings):
+                b.setChecked(False)
+            # Refresh the cached channel list so the scraper sees fresh targets
+            self.page_scrape.populate_channels()
+        elif "AutoTransfer" in item_text:
+            self.header.hide()
+            self.stacked_widget.setCurrentIndex(7)
+            for b in (self.btn_home, self.btn_explore, self.btn_queue, self.btn_files, self.btn_settings):
+                b.setChecked(False)
+            # Reload page state (runs a one-off check only when enabled + Check Now)
+            self.page_auto_transfer.load_state()
+        elif "Backup" in item_text:
+            self.header.hide()
+            self.stacked_widget.setCurrentIndex(9)
+            for b in (self.btn_home, self.btn_explore, self.btn_queue, self.btn_files, self.btn_settings):
+                b.setChecked(False)
+            self.page_backup.populate()
+        elif "AutoMessage" in item_text:
+            self.header.hide()
+            self.stacked_widget.setCurrentIndex(8)
+            for b in (self.btn_home, self.btn_explore, self.btn_queue, self.btn_files, self.btn_settings):
+                b.setChecked(False)
+            self.page_auto_message.load_state()
         else:
             self.header.hide()
 
@@ -959,6 +1038,14 @@ class MainWindow(QMainWindow):
                 self.page_files.update_theme(is_dark)
             if hasattr(self, 'page_explore') and hasattr(self.page_explore, 'update_theme'):
                 self.page_explore.update_theme(is_dark)
+            if hasattr(self, 'page_scrape') and hasattr(self.page_scrape, 'update_theme'):
+                self.page_scrape.update_theme(is_dark)
+            if hasattr(self, 'page_auto_transfer') and hasattr(self.page_auto_transfer, 'update_theme'):
+                self.page_auto_transfer.update_theme(is_dark)
+            if hasattr(self, 'page_auto_message') and hasattr(self.page_auto_message, 'update_theme'):
+                self.page_auto_message.update_theme(is_dark)
+            if hasattr(self, 'page_backup') and hasattr(self.page_backup, 'update_theme'):
+                self.page_backup.update_theme(is_dark)
             self.update_home_icons(is_dark)
         finally:
             self.setUpdatesEnabled(True)
@@ -985,6 +1072,11 @@ class MainWindow(QMainWindow):
         self.page_settings.logoutRequested.connect(self.logout)
         if hasattr(self.worker.signals, 'dialogs_fetched'):
             self.worker.signals.dialogs_fetched.connect(lambda dialogs: self.refresh_channels_list())
+        # Auto Transfer background status indicator (visible on every page)
+        if hasattr(self.worker.signals, 'auto_transfer_status'):
+            self.worker.signals.auto_transfer_status.connect(self._on_at_status)
+        if hasattr(self.worker.signals, 'auto_transfer_finished'):
+            self.worker.signals.auto_transfer_finished.connect(self._on_at_finished)
         if hasattr(self.worker.signals, 'avatar_ready'):
             self.worker.signals.avatar_ready.connect(self.on_avatar_ready)
         # sidebar signals are now handled by button connects
@@ -1024,6 +1116,31 @@ class MainWindow(QMainWindow):
         auth_dialogs.show_auth_error(self, err_msg)
         self.page_login.reset_to_start()
             
+    def _maybe_send_auto_message(self):
+        """Called every minute; fires the Auto Message send only when the
+        configured interval has elapsed since the last run."""
+        try:
+            from datetime import datetime
+            from auto_message import get_auto_message
+            state = get_auto_message()
+            if not state["enabled"]:
+                return
+            if not state["destination_ids"] or not state["messages"]:
+                return
+            last = state["last_run"]
+            if not last:
+                due = True
+            else:
+                try:
+                    last_dt = datetime.strptime(last, "%Y-%m-%d %H:%M:%S")
+                    due = (datetime.now() - last_dt).total_seconds() >= state["interval_minutes"] * 60
+                except Exception:
+                    due = True
+            if due and self.worker:
+                self.worker.send_auto_message()
+        except Exception:
+            pass
+
     def on_auth_success(self):
         if self._is_authenticating:
             self.sidebarWidget.show()
@@ -1033,7 +1150,31 @@ class MainWindow(QMainWindow):
         self.load_active_tasks_from_worker()
         if self.worker:
             self.worker.fetch_user_dialogs()
+            # Auto Transfer: run a check right at app start (if enabled)
+            try:
+                self.worker.run_auto_transfer_check()
+            except Exception:
+                pass
+            # Auto Reply: run a check right at app start
+            try:
+                self.worker.check_auto_reply()
+            except Exception:
+                pass
         
+    def _on_at_status(self, text):
+        text = (text or "").strip()
+        if text:
+            self.lbl_bg_status.setText("Auto Transfer: " + text)
+            self.lbl_bg_status.setVisible(True)
+        else:
+            self.lbl_bg_status.setText("")
+
+    def _on_at_finished(self):
+        # Keep the last status briefly, then hide
+        self.lbl_bg_status.setText("Auto Transfer: finished")
+        from PySide6.QtCore import QTimer
+        QTimer.singleShot(3000, lambda: self.lbl_bg_status.setVisible(False))
+
     def load_active_tasks_from_worker(self):
         print("DEBUG: load_active_tasks_from_worker started")
         if self._tasks_loaded:
@@ -1131,7 +1272,8 @@ class MainWindow(QMainWindow):
         if cached:
             # 📒 Show this channel in Known Channels (id came from cache rows)
             try:
-                cache_channel(str(cached[0]["channel_id"]), "", channel)
+                from accounts import get_active_account_id
+                cache_channel(str(cached[0]["channel_id"]), "", channel, account_id=get_active_account_id())
                 self.refresh_channels_list()
             except Exception:
                 pass
@@ -1299,11 +1441,13 @@ class MainWindow(QMainWindow):
         
         # 📒 Cache the resolved channel ID so it shows up in Known Channels
         from database import cache_channel
+        from accounts import get_active_account_id
         try:
             cache_channel(
                 data.get("channel_input", ""),
                 data.get("title", ""),
-                ""
+                "",
+                account_id=get_active_account_id()
             )
             self.refresh_channels_list()
         except Exception:

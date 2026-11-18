@@ -1,6 +1,6 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QStackedWidget, QFrame, QSizePolicy, QComboBox
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QStackedWidget, QFrame, QSizePolicy, QComboBox, QCheckBox
 )
 from PySide6.QtCore import Qt, Signal, QUrl
 from PySide6.QtGui import QIcon, QPixmap, QDesktopServices, QFontMetrics, QShowEvent
@@ -154,10 +154,12 @@ class LoginView(QWidget):
 
         # API ID
         g1, self.inp_api_id = _create_field("API ID", "e.g. 12345678")
-        l1.addLayout(g1)
-
         # API Hash
         g2, self.inp_api_hash = _create_field("API HASH", "32-character hex string")
+        # API ID field wrappers (so we can hide them in 'phone number only' mode)
+        self.api_id_group = g1
+        self.api_hash_group = g2
+        l1.addLayout(g1)
         l1.addLayout(g2)
 
         # Phone Number using ShadcnPhoneInput (matches shadcn-phone-input.vercel.app)
@@ -172,6 +174,13 @@ class LoginView(QWidget):
         box_phone.addWidget(lbl_phone)
         box_phone.addWidget(self.phone_input)
         l1.addLayout(box_phone)
+
+        # ── Phone-number-only mode (skip API credentials) ──
+        self.chk_phone_only = QCheckBox("Log in with phone number only — no API ID or API Hash needed")
+        self.chk_phone_only.setCursor(Qt.PointingHandCursor)
+        self.chk_phone_only.setStyleSheet("QCheckBox { font-size: 12px; padding: 2px 0px; }")
+        self.chk_phone_only.toggled.connect(self._on_phone_only_toggled)
+        l1.addWidget(self.chk_phone_only)
 
         # Connect return key to submit
         self.inp_api_id.returnPressed.connect(self.on_send_code)
@@ -326,6 +335,23 @@ class LoginView(QWidget):
         self.lbl_error_p3.clear()
         self.lbl_error_p3.hide()
 
+    def _set_api_fields_visible(self, visible: bool):
+        for g in (self.api_id_group, self.api_hash_group):
+            for i in range(g.count()):
+                w = g.itemAt(i)
+                widget = w.widget() if w else None
+                if widget is not None:
+                    widget.setVisible(visible)
+
+    def _on_phone_only_toggled(self, checked: bool):
+        self._set_api_fields_visible(not checked)
+        if checked:
+            self.clear_errors()
+            self.btn_send_code.setText("Log In with Phone Number")
+            self.phone_input.setFocus()
+        else:
+            self.btn_send_code.setText("Continue with Credentials")
+
     def load_env_defaults(self):
         from dotenv import load_dotenv
         from resource_utils import get_project_root
@@ -335,7 +361,7 @@ class LoginView(QWidget):
         api_id   = os.getenv('API_ID')
         api_hash = os.getenv('API_HASH')
         phone    = os.getenv('PHONE')
-        
+
         if api_id:
             api_id = str(api_id).strip("'").strip('"')
             self.inp_api_id.setText(api_id)
@@ -346,50 +372,63 @@ class LoginView(QWidget):
             phone = str(phone).strip("'").strip('"').strip()
             self.phone_input.set_phone(phone)
 
+        # If no API credentials are configured, default to phone-number-only mode
+        if not (api_id and api_hash):
+            self.chk_phone_only.setChecked(True)
+
     def on_send_code(self):
         self.clear_errors()
-        api_id   = self.inp_api_id.text().strip()
-        api_hash = self.inp_api_hash.text().strip()
+        phone_only = self.chk_phone_only.isChecked()
+        if phone_only:
+            from accounts import get_builtin_credentials
+            api_id, api_hash = get_builtin_credentials()
+            api_id = str(api_id)
+        else:
+            api_id   = self.inp_api_id.text().strip()
+            api_hash = self.inp_api_hash.text().strip()
         raw_phone = self.phone_input.line_edit.text().strip()
         phone = self.phone_input.get_full_phone()
 
-        if not api_id:
-            self.show_error("Please enter your Telegram API ID.")
-            self.inp_api_id.setFocus()
-            return
-        if not api_id.isdigit():
-            self.show_error("API ID must be numeric digits (e.g. 12345678).")
-            self.inp_api_id.setFocus()
-            return
-        if not api_hash:
-            self.show_error("Please enter your Telegram API Hash.")
-            self.inp_api_hash.setFocus()
-            return
+        if not phone_only:
+            if not api_id:
+                self.show_error("Please enter your Telegram API ID.")
+                self.inp_api_id.setFocus()
+                return
+            if not api_id.isdigit():
+                self.show_error("API ID must be numeric digits (e.g. 12345678).")
+                self.inp_api_id.setFocus()
+                return
+            if not api_hash:
+                self.show_error("Please enter your Telegram API Hash.")
+                self.inp_api_hash.setFocus()
+                return
         if not raw_phone or not phone:
             self.show_error("Please enter your phone number.")
             self.phone_input.line_edit.setFocus()
             return
 
-        from resource_utils import get_project_root
-        env_path = os.path.join(get_project_root(), '.env')
-        try:
-            lines = []
-            if os.path.exists(env_path):
-                with open(env_path, "r", encoding="utf-8") as f:
-                    lines = f.readlines()
-            env_data = {}
-            for line in lines:
-                if "=" in line:
-                    k, v = line.strip().split("=", 1)
-                    env_data[k.strip()] = v.strip()
-            env_data["API_ID"] = api_id
-            env_data["API_HASH"] = api_hash
-            env_data["PHONE"] = phone
-            with open(env_path, "w", encoding="utf-8") as f:
-                for k, v in env_data.items():
-                    f.write(f"{k}={v}\n")
-        except Exception as e:
-            print(f"Error saving .env: {e}")
+        # Only persist credentials when the user entered them explicitly this session
+        if not phone_only:
+            from resource_utils import get_project_root
+            env_path = os.path.join(get_project_root(), '.env')
+            try:
+                lines = []
+                if os.path.exists(env_path):
+                    with open(env_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                env_data = {}
+                for line in lines:
+                    if "=" in line:
+                        k, v = line.strip().split("=", 1)
+                        env_data[k.strip()] = v.strip()
+                env_data["API_ID"] = api_id
+                env_data["API_HASH"] = api_hash
+                env_data["PHONE"] = phone
+                with open(env_path, "w", encoding="utf-8") as f:
+                    for k, v in env_data.items():
+                        f.write(f"{k}={v}\n")
+            except Exception as e:
+                print(f"Error saving .env: {e}")
 
         self.btn_send_code.setEnabled(False)
         self.btn_send_code.setText("Connecting…")

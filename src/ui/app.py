@@ -145,14 +145,11 @@ def apply_theme(is_dark=False):
         app_palette.setColor(QPalette.WindowText, QColor("#09090B"))
     _app_instance.setPalette(app_palette)
 
-    filename = "dark_style.qss" if is_dark else "style.qss"
-    qss_path = get_resource_path(os.path.join("assets", "styles", filename))
-    if os.path.exists(qss_path):
-        with open(qss_path, "r", encoding="utf-8") as f:
-            qss_content = f.read()
-            icons_dir = get_resource_path(os.path.join("assets", "icons")).replace("\\", "/")
-            qss_content = qss_content.replace("@ICONS_DIR@", icons_dir)
-            _app_instance.setStyleSheet(qss_content)
+    import ui.theme as theme
+    qss_content = theme.render_qss(is_dark)
+    icons_dir = get_resource_path(os.path.join("assets", "icons")).replace("\\", "/")
+    qss_content = qss_content.replace("@ICONS_DIR@", icons_dir)
+    _app_instance.setStyleSheet(qss_content)
     # Re-apply QToolTip palette to guarantee it is retained after stylesheet application
     QToolTip.setPalette(tip_palette)
 

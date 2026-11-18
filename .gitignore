@@ -34,3 +34,5 @@ cache/
 scratch/
 src/telegram-video-downloader/
 src/ui/components/credential_info_request.py
+auto_transfer_cache/
+scraped_members/

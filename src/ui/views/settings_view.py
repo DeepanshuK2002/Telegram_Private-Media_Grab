@@ -1,15 +1,17 @@
 from PySide6.QtWidgets import (
-    QWidget, QVBoxLayout, QHBoxLayout, QLabel, 
-    QLineEdit, QPushButton, QCheckBox, QComboBox, 
+    QWidget, QVBoxLayout, QHBoxLayout, QLabel,
+    QLineEdit, QPushButton, QCheckBox, QComboBox,
     QFrame, QFileDialog, QSpinBox, QMessageBox,
-    QScrollArea, QGridLayout
+    QScrollArea, QGridLayout, QListWidget, QListWidgetItem, QInputDialog
 )
-from PySide6.QtCore import Qt, Signal, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import Qt, Signal, QUrl, QTimer
+from PySide6.QtGui import QDesktopServices, QIcon
 import json
 import os
 from resource_utils import get_project_root
+from accounts import get_accounts, get_active_account_id, set_active_account_id, add_account, remove_account
 from ui.components.clean_combobox import CleanComboBox
+from ui.components.searchable_combobox import SearchableComboBox
 
 CONFIG_FILE = os.path.join(get_project_root(), "config.json")
 
@@ -56,7 +58,12 @@ class SettingsView(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._worker = None
+        self._worker_events_connected = False
+        self._accounts_cache = []
+        self._account_status = {}
         self.setup_ui()
+        self.refresh_accounts()
 
     def setup_ui(self):
         # Root layout
@@ -123,6 +130,72 @@ class SettingsView(QWidget):
         theme_layout.addLayout(theme_row)
 
         self.scroll_layout.addWidget(card_theme)
+
+        # ── Section 1.5: Accounts (multi-account login) ───────────────────────
+        card_acc = self._create_card()
+        acc_layout = QVBoxLayout(card_acc)
+        acc_layout.setContentsMargins(28, 24, 28, 24)
+        acc_layout.setSpacing(12)
+
+        lbl_acc_title = QLabel("Accounts")
+        lbl_acc_title.setObjectName("SectionHeader")
+        acc_layout.addWidget(lbl_acc_title)
+
+        lbl_acc_desc = QLabel("Log in to multiple Telegram accounts — like Telegram itself. You can switch the active account, and Auto Transfer can download from one account and upload via another.")
+        lbl_acc_desc.setObjectName("MutedText")
+        lbl_acc_desc.setWordWrap(True)
+        acc_layout.addWidget(lbl_acc_desc)
+
+        self.accounts_list = QListWidget()
+        self.accounts_list.setObjectName("accountsList")
+        self.accounts_list.setFixedHeight(180)
+        self._style_accounts_list()
+        acc_layout.addWidget(self.accounts_list)
+
+        acc_btn_row = QHBoxLayout()
+        acc_btn_row.setSpacing(8)
+
+        self.btn_add_account = QPushButton("Add Account…")
+        self.btn_add_account.setObjectName("SecondaryButton")
+        self.btn_add_account.setFixedHeight(34)
+        self.btn_add_account.setCursor(Qt.PointingHandCursor)
+        self.btn_add_account.clicked.connect(self.add_account_clicked)
+        acc_btn_row.addWidget(self.btn_add_account)
+
+        self.btn_login_account = QPushButton("Log In")
+        self.btn_login_account.setObjectName("SecondaryButton")
+        self.btn_login_account.setFixedHeight(34)
+        self.btn_login_account.setCursor(Qt.PointingHandCursor)
+        self.btn_login_account.clicked.connect(self.login_account_clicked)
+        acc_btn_row.addWidget(self.btn_login_account)
+
+        self.btn_set_active = QPushButton("Set Active")
+        self.btn_set_active.setObjectName("SecondaryButton")
+        self.btn_set_active.setFixedHeight(34)
+        self.btn_set_active.setCursor(Qt.PointingHandCursor)
+        self.btn_set_active.clicked.connect(self.set_active_clicked)
+        acc_btn_row.addWidget(self.btn_set_active)
+
+        self.btn_remove_account = QPushButton("Remove")
+        self.btn_remove_account.setObjectName("LogoutBtn")
+        self.btn_remove_account.setFixedHeight(34)
+        self.btn_remove_account.setCursor(Qt.PointingHandCursor)
+        self.btn_remove_account.clicked.connect(self.remove_account_clicked)
+        acc_btn_row.addWidget(self.btn_remove_account)
+
+        self.btn_refresh_accounts = QPushButton("Refresh Status")
+        self.btn_refresh_accounts.setObjectName("SecondaryButton")
+        self.btn_refresh_accounts.setFixedHeight(34)
+        self.btn_refresh_accounts.setCursor(Qt.PointingHandCursor)
+        self.btn_refresh_accounts.clicked.connect(self.refresh_accounts_status_clicked)
+        acc_btn_row.addWidget(self.btn_refresh_accounts)
+
+        self.lbl_account_status = QLabel("Add an account or set one as active.")
+        self.lbl_account_status.setObjectName("MutedText")
+        self.lbl_account_status.setWordWrap(True)
+        acc_layout.addWidget(self.lbl_account_status)
+
+        self.scroll_layout.addWidget(card_acc)
 
         # ── Section 2: Download Settings ──────────────────────────────────────
         card_dl = self._create_card()
@@ -208,7 +281,7 @@ class SettingsView(QWidget):
 
         proxy_row1 = QHBoxLayout()
         proxy_row1.setSpacing(8)
-        self.combo_proxy_type = CleanComboBox()
+        self.combo_proxy_type = SearchableComboBox()
         self.combo_proxy_type.addItems(["SOCKS5", "SOCKS4", "HTTP"])
         self.combo_proxy_type.setFixedWidth(110)
         self.combo_proxy_type.setFixedHeight(38)
@@ -391,6 +464,39 @@ class SettingsView(QWidget):
     def _on_theme_toggled(self, is_checked: bool):
         self.themeToggled.emit(is_checked)
 
+    def _style_accounts_list(self):
+        """Apply theme-aware styling to the accounts list widget."""
+        try:
+            cfg = load_config()
+            is_dark = bool(cfg.get("dark_mode", False))
+        except Exception:
+            is_dark = False
+        from ui.theme import get_tokens
+        t = get_tokens(is_dark)
+        item_hover = t['muted']
+        self.accounts_list.setStyleSheet(f"""
+            QListWidget#accountsList {{
+                background-color: {t['card']};
+                border: 1px solid {t['border']};
+                border-radius: 6px;
+                color: {t['foreground']};
+                font-size: 12px;
+                padding: 4px;
+            }}
+            QListWidget#accountsList::item {{
+                border-radius: 4px;
+                padding: 8px 10px;
+                color: {t['foreground']};
+            }}
+            QListWidget#accountsList::item:hover {{
+                background-color: {item_hover};
+            }}
+            QListWidget#accountsList::item:selected {{
+                background-color: {t['accent_soft']};
+                color: {t['selected_text']};
+            }}
+        """)
+
     def load_settings(self):
         config = load_config()
 
@@ -478,3 +584,183 @@ class SettingsView(QWidget):
 
     def logout_clicked(self):
         self.logoutRequested.emit()
+
+    # ── Multi-account management ─────────────────────────────────────────
+
+    def set_worker(self, worker):
+        self._worker = worker
+        if worker and not self._worker_events_connected:
+            worker.signals.account_event.connect(self._on_account_event)
+            self._worker_events_connected = True
+            self._schedule_account_check()
+
+    def _schedule_account_check(self, attempts=0):
+        if not self._worker:
+            return
+        if getattr(self._worker, "loop", None):
+            self.refresh_accounts(check=True)
+            return
+        if attempts < 20:
+            QTimer.singleShot(250, lambda: self._schedule_account_check(attempts + 1))
+
+    def refresh_accounts(self, check=True):
+        # Rebuild the accounts list from config and (optionally) verify logins.
+        accounts = get_accounts()
+        self._accounts_cache = accounts
+        active = get_active_account_id()
+
+        self.accounts_list.clear()
+        for acc in accounts:
+            acc_id = acc.get("id")
+            name = acc.get("name") or acc_id
+            phone = (acc.get("phone") or "").strip()
+            if phone and phone.replace(" ", "").replace("-", "").isdigit() and not phone.startswith("+"):
+                phone = "+" + phone
+            username = (acc.get("username") or "").strip()
+            user_id = acc.get("user_id") or 0
+            status = self._account_status.get(acc_id)
+            if acc_id == active:
+                if status is True:
+                    status_txt = "  - Active - Logged in"
+                elif status is False:
+                    status_txt = "  - Active - Not logged in"
+                else:
+                    status_txt = "  - Active"
+            elif status is True:
+                status_txt = "  - Logged in"
+            elif status is False:
+                status_txt = "  - Not logged in"
+            else:
+                status_txt = "  - Not checked"
+
+            phone_txt = phone if phone else "(phone not on file)"
+            ident = ""
+            if username:
+                ident = "  -  @" + username
+            elif user_id:
+                ident = "  -  id " + str(user_id)
+            item = QListWidgetItem(name + "  -  " + phone_txt + ident + status_txt)
+            item.setToolTip(
+                "Name: " + str(name) + "\n"
+                "Phone: " + (phone or "(not recorded yet - log in to capture it)") + "\n"
+                "Username: " + ("@" + username if username else "-") + "\n"
+                "User ID: " + str(user_id or "-") + "\n"
+                "Session: " + str(acc.get("session") or "-") + "\n"
+                "Status: " + status_txt.strip()
+            )
+            item.setData(Qt.UserRole, acc_id)
+            self.accounts_list.addItem(item)
+
+        if check and self._worker:
+            self._worker.check_all_accounts()
+
+    def refresh_accounts_status_clicked(self):
+        if not self._worker:
+            QMessageBox.information(self, "Accounts", "Telegram client is not ready yet.")
+            return
+        self.lbl_account_status.setText("Checking login status...")
+        self._worker.check_all_accounts()
+
+    def _selected_account_id(self):
+        item = self.accounts_list.currentItem()
+        return item.data(Qt.UserRole) if item else None
+
+    def _account_name(self, account_id):
+        for acc in self._accounts_cache or []:
+            if acc.get("id") == account_id:
+                return acc.get("name") or account_id
+        return str(account_id)
+
+    def _on_account_event(self, event: str):
+        parts = event.split(":", 2)
+        kind = parts[0]
+        acc_id = parts[1] if len(parts) > 1 else ""
+        payload = parts[2] if len(parts) > 2 else ""
+
+        if kind == "status":
+            self._account_status[acc_id] = (payload == "1")
+            self.refresh_accounts(check=False)
+        elif kind == "code_sent":
+            phone = payload or acc_id
+            self._prompt_account_code(acc_id, phone)
+        elif kind == "password_needed":
+            pwd, ok = QInputDialog.getText(self, "Two-Step Verification",
+                                           "Enter your 2FA password:", QLineEdit.Password)
+            if ok and pwd and self._worker:
+                self._worker.submit_account_password(acc_id, pwd)
+        elif kind == "success":
+            self._account_status[acc_id] = True
+            self.refresh_accounts(check=False)
+            self.lbl_account_status.setText(f"Logged in: {self._account_name(acc_id)}")
+            QMessageBox.information(self, "Account", f"'{self._account_name(acc_id)}' logged in successfully.")
+        elif kind == "switched":
+            self._account_status[acc_id] = True
+            self.refresh_accounts(check=False)
+            self.lbl_account_status.setText(f"Switched active account to: {self._account_name(acc_id)}")
+        elif kind == "error":
+            self._account_status[acc_id] = False
+            self.refresh_accounts(check=False)
+            self.lbl_account_status.setText(f"Login failed: {payload}")
+            QMessageBox.critical(self, "Account Error", f"Could not log in:\n{payload}")
+
+    def _prompt_account_code(self, account_id, phone):
+        code, ok = QInputDialog.getText(self, "Verification Code",
+                                        f"Enter the code sent to {phone}:")
+        if ok and code and self._worker:
+            self._worker.submit_account_code(account_id, code.strip())
+
+    def add_account_clicked(self):
+        name, ok = QInputDialog.getText(self, "Add Account", "Account name (e.g. Work, Personal, Seller1):")
+        if not ok or not name.strip():
+            return
+        name = name.strip()
+        phone, ok2 = QInputDialog.getText(self, "Add Account",
+                                          "Phone number with country code (e.g. +1234567890).\nLeave empty to skip login for now:")
+        acc = add_account(name, phone=phone.strip() if ok2 else "")
+        self.refresh_accounts(check=False)
+        if ok2 and phone.strip() and self._worker:
+            self.lbl_account_status.setText(f"Logging in '{name}'…")
+            self._worker.start_account_login(acc["id"], phone.strip())
+        else:
+            self.lbl_account_status.setText(f"Account '{name}' added. Click 'Log In' when you're ready.")
+
+    def login_account_clicked(self):
+        acc_id = self._selected_account_id()
+        if not acc_id:
+            QMessageBox.information(self, "Accounts", "Select an account from the list first.")
+            return
+        if not self._worker:
+            QMessageBox.warning(self, "Accounts", "Telegram client is not ready yet.")
+            return
+        phone, ok = QInputDialog.getText(self, "Log In", f"Phone number for '{self._account_name(acc_id)}' (e.g. +1234567890):")
+        if ok and phone.strip():
+            self.lbl_account_status.setText(f"Logging in '{self._account_name(acc_id)}'…")
+            self._worker.start_account_login(acc_id, phone.strip())
+
+    def set_active_clicked(self):
+        acc_id = self._selected_account_id()
+        if not acc_id:
+            QMessageBox.information(self, "Accounts", "Select an account from the list first.")
+            return
+        if self._worker:
+            self._worker.switch_account(acc_id)
+        else:
+            set_active_account_id(acc_id)
+            self.refresh_accounts(check=False)
+
+    def remove_account_clicked(self):
+        acc_id = self._selected_account_id()
+        if not acc_id:
+            QMessageBox.information(self, "Accounts", "Select an account from the list first.")
+            return
+        if acc_id == "default":
+            QMessageBox.warning(self, "Remove Account", "The Main Account cannot be removed.")
+            return
+        answer = QMessageBox.question(self, "Remove Account",
+                                      f"Remove '{self._account_name(acc_id)}'?\nIts Telegram session will be deleted from this device.",
+                                      QMessageBox.Yes | QMessageBox.No)
+        if answer == QMessageBox.Yes:
+            remove_account(acc_id)
+            self._account_status.pop(acc_id, None)
+            self.refresh_accounts(check=False)
+            self.lbl_account_status.setText(f"Removed '{self._account_name(acc_id)}'")

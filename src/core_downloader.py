@@ -182,7 +182,12 @@ async def fetch_channel(client, channel_input):
         if "Could not find the input entity" in str(e):
             error_msg += (
                 f"\n\nWe scanned all {active_count} active and {archived_count} archived dialogs on this account, and the ID {original_input} is not among them."
-                f"\n\nTo fix this:\n1. Open the channel on your phone to refresh it to the top of your chat list.\n2. Ensure you are logged into the correct Telegram account covering these chats.\n3. OR bypass this entirely by pasting the invite link (https://t.me/...) into the search bar."
+                f"\n\nThis usually means one of:\n"
+                f"1. The account logged into the app is not (or no longer) a member of this channel. Open Settings → Accounts to see which account is active.\n"
+                f"2. The channel shown in the list is a stale cached entry — the app's channel cache is shared and never pruned, so it can show channels this account cannot reach (often with an OLD id while a newer channel with the same title exists). Re-sync channels from Explore, then pick the entry whose ID matches.\n"
+                f"3. The channel lives on a different Telegram account: log that account in (Settings → Accounts → Add Account) and switch to it, or pick it under 'Download from account' in Auto Transfer.\n"
+                f"4. You were removed / the channel was converted or deleted — ask a channel admin to re-add this account.\n"
+                f"If you have a valid invite link you are allowed to use, you can paste it into the Explore search bar instead of the ID."
             )
             
         raise Exception(error_msg) # Re-raise with the helpful tip
@@ -288,14 +293,25 @@ async def download_single_file(client, channel, message, folder_name, progress_c
 
                 # 2. Check if .part file already matches full expected size and can be finalized immediately
                 part_path = expected_filepath + ".part"
-                meta_path = expected_filepath + ".part.meta"
-                if os.path.exists(part_path) and file_size and os.path.getsize(part_path) == file_size:
-                    if _atomic_finalize_sync(part_path, expected_filepath, meta_path):
-                        if progress_cb:
-                            progress_cb(message.id, file_size, file_size, speed_str="Complete")
-                        if complete_cb:
-                            complete_cb(message.id, filepath=expected_filepath)
-                        return
+                meta_path = part_path + ".meta"
+                # Only finalize a .part as complete when its .meta validates every chunk;
+                # a .part can linger at full size from a crashed run but contain incomplete data.
+                if file_size and os.path.exists(part_path) and os.path.getsize(part_path) == file_size and os.path.exists(meta_path):
+                    try:
+                        import json, math
+                        with open(meta_path, "r", encoding="utf-8") as mf:
+                            meta = json.load(mf)
+                        total_parts = (file_size + 512 * 1024 - 1) // (512 * 1024)
+                        expected_parts = list(range(1, total_parts + 1))
+                        if meta.get("file_size") == file_size and set(meta.get("completed_parts", [])) == set(expected_parts):
+                            if _atomic_finalize_sync(part_path, expected_filepath, meta_path):
+                                if progress_cb:
+                                    progress_cb(message.id, file_size, file_size, speed_str="Complete")
+                                if complete_cb:
+                                    complete_cb(message.id, filepath=expected_filepath)
+                                return
+                    except Exception:
+                        pass
 
             # Speed tracking variables
             start_time = [time.time()]
@@ -364,7 +380,7 @@ async def download_single_file(client, channel, message, folder_name, progress_c
                             file_size=file_size,
                             progress_callback=internal_progress,
                             cancel_event=cancel_event,
-                            workers=4
+                            workers=8
                         )
                         if success and os.path.exists(expected_filepath):
                             file_path = expected_filepath
