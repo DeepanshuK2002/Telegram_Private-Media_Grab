@@ -705,7 +705,8 @@ class SettingsView(QWidget):
 
     def _prompt_account_code(self, account_id, phone):
         code, ok = QInputDialog.getText(self, "Verification Code",
-                                        f"Enter the code sent to {phone}:")
+                                        f"Enter the code sent to {phone}.\n"
+                                        "(Check your Telegram app for this number, or SMS if app delivery failed.)")
         if ok and code and self._worker:
             self._worker.submit_account_code(account_id, code.strip())
 

@@ -1791,22 +1791,35 @@ class TelegramWorker(QThread):
         if client is None:
             self.signals.account_event.emit(f"error:{account_id}:failed to connect or missing API credentials")
             return
+        # Normalize phone number: strip spaces/dashes, ensure leading +
+        phone = (phone or "").strip().replace(" ", "").replace("-", "")
+        if phone and not phone.startswith("+"):
+            phone = "+" + phone
         # Persist the phone the user entered so Settings can show it immediately
         try:
             from accounts import update_account, _normalize_phone
-            update_account(account_id, phone=_normalize_phone(str(phone).strip()))
+            update_account(account_id, phone=_normalize_phone(phone))
         except Exception:
             pass
         if authorized:
             await self._store_account_identity(client, account_id)
             self.signals.account_event.emit(f"success:{account_id}")
             return
-        try:
-            await client.send_code_request(phone)
-            self._pending_login[account_id] = phone
-            self.signals.account_event.emit(f"code_sent:{account_id}:{phone}")
-        except Exception as e:
-            self.signals.account_event.emit(f"error:{account_id}:{e}")
+        # Try sending the code to the Telegram app first, then fall back to SMS
+        last_err = None
+        for force_sms in (False, True):
+            try:
+                await client.send_code_request(phone, force_sms=force_sms)
+                self._pending_login[account_id] = phone
+                self.signals.account_event.emit(f"code_sent:{account_id}:{phone}")
+                return
+            except Exception as e:
+                last_err = e
+                # Only retry with SMS if the first (app) attempt failed
+                if not force_sms:
+                    continue
+                break
+        self.signals.account_event.emit(f"error:{account_id}:{last_err}")
 
     async def _store_account_identity(self, client, account_id):
         """Fetch get_me() and persist phone/username/user_id for the account."""
