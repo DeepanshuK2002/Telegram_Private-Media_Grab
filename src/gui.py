@@ -70,4 +70,7 @@ if __name__ == "__main__":
         print(f"FATAL ERROR AT ENTRY: {e}")
         import traceback
         traceback.print_exc()
-        input("Press Enter to close...") # Hold the terminal open
+        try:
+            input("Press Enter to close...") # Hold the terminal open
+        except Exception:
+            pass

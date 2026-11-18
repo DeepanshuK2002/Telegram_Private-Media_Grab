@@ -59,6 +59,10 @@ def _normalize_phone(phone: str) -> str:
     return 2040, "b18441a1ff607e10a989891a5462e627"
 
 
+def get_builtin_credentials():
+    return 2040, "b18441a1ff607e10a989891a5462e627"
+
+
 def _legacy_credentials():
     api_id, api_hash = 0, ""
     try:
